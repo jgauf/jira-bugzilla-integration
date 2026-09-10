@@ -181,11 +181,18 @@ def test_invariant_c_round_trip_terminates(
         ),
     )
     mocked_jira.reset_mock()
+    # Make the forward path fully viable, so the echo gate is the *only*
+    # thing that can stop leg 2. Without this the linked-project check
+    # rejects the event first and the test would pass even with the gate
+    # deleted -- it would assert nothing.
+    mocked_jira.get_issue.return_value = {"fields": {"project": {"key": "JBI"}}}
 
     with mock.patch.object(settings, "bugzilla_bot_login", "jbi-bot@mozilla.bugs"):
         with mock.patch("jbi.runner.settings", settings):
-            with pytest.raises(IgnoreInvalidRequestError):
+            with pytest.raises(IgnoreInvalidRequestError) as exc_info:
                 execute_action(request=echo, actions=Actions(root=[inbound_action]))
+
+    assert "authored by JBI itself" in str(exc_info.value)
 
     assert not mocked_jira.set_issue_status.called
     assert not mocked_jira.update_issue_field.called

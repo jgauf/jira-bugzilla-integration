@@ -132,3 +132,7 @@ dmypy.json
 # IDEs
 .idea/
 .vscode/
+
+# Local manual-testing harness (see .local-harness/README.md)
+.local-harness/
+.install.stamp
