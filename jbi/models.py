@@ -160,6 +160,22 @@ class ActionParams(BaseModel, frozen=True):
     # Jira event has any effect until an action opts in.
     jira_inbound_enabled: bool = False
 
+    @field_validator("min_priority")
+    @classmethod
+    def validate_min_priority(cls, value: Optional[str]):
+        """`min_priority` must be a BMO priority (R-04)."""
+        if value is not None and value not in ("P1", "P2", "P3", "P4", "P5"):
+            raise ValueError(f"`min_priority` must be one of P1..P5, got {value!r}")
+        return value
+
+    @field_validator("min_severity")
+    @classmethod
+    def validate_min_severity(cls, value: Optional[str]):
+        """`min_severity` must be a BMO severity (R-04)."""
+        if value is not None and value not in ("S1", "S2", "S3", "S4"):
+            raise ValueError(f"`min_severity` must be one of S1..S4, got {value!r}")
+        return value
+
 
 class Action(BaseModel, frozen=True):
     """

@@ -78,6 +78,38 @@ def _bug_in_action_scope(bug: bugzilla_models.Bug, action: Action) -> bool:
     return False
 
 
+# R-04 thresholds. Ordered most-severe first, so a lower index means "at least
+# as important as". Values outside these lists (``--``, ``""``, ``N/A``, or an
+# unset field) are treated as *below* any configured threshold: BMO leaves both
+# fields unset until triage, and the point of R-04 is to keep pre-triage bugs
+# out of Jira.
+PRIORITY_ORDER = ["P1", "P2", "P3", "P4", "P5"]
+SEVERITY_ORDER = ["S1", "S2", "S3", "S4"]
+
+
+def _meets_threshold(
+    value: Optional[str], minimum: Optional[str], order: list[str]
+) -> bool:
+    """Return True when `value` is at least as important as `minimum`."""
+    if not minimum:
+        return True
+    if value not in order:
+        return False
+    return order.index(value) <= order.index(minimum)
+
+
+def _bug_meets_sync_thresholds(bug: bugzilla_models.Bug, action: Action) -> bool:
+    """Return True when the bug is at or above the action's priority/severity bar.
+
+    Both thresholds must be met when both are configured. Unset thresholds
+    (``None``) impose no restriction, which is today's behavior.
+    """
+    params = action.parameters
+    return _meets_threshold(
+        bug.priority, params.min_priority, PRIORITY_ORDER
+    ) and _meets_threshold(bug.severity, params.min_severity, SEVERITY_ORDER)
+
+
 GROUP_TO_OPERATION = {
     "new": Operation.CREATE,
     "existing": Operation.UPDATE,
@@ -354,6 +386,25 @@ def do_execute_actions(
 
         if action_context.jira.issue is None:
             if event.target == "bug":
+                # R-04: only gate *creation*. Once a bug has a linked issue we
+                # keep syncing it even if it later drops below the threshold,
+                # otherwise an existing Jira issue would silently stop tracking
+                # its bug (worse than never having been created).
+                if not _bug_meets_sync_thresholds(bug, action):
+                    logger.info(
+                        "Bug %s is below the sync threshold of action %r "
+                        "(priority=%r, severity=%r)",
+                        bug.id,
+                        action.whiteboard_tag,
+                        bug.priority,
+                        bug.severity,
+                        extra=action_context.update(
+                            operation=Operation.IGNORE
+                        ).model_dump(),
+                    )
+                    statsd.incr("jbi.bugzilla.ignored.count")
+                    continue
+
                 action_context = action_context.update(operation=Operation.CREATE)
 
         else:

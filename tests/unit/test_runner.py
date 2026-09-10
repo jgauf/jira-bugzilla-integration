@@ -994,3 +994,114 @@ def test_scope_gate_uses_refreshed_bug_data(
     execute_action(request=webhook, actions=actions)
 
     assert mocked_jira.create_issue.called
+
+
+# --- R-04: priority/severity threshold (plan D3) ----------------------------
+
+
+@pytest.mark.parametrize(
+    "min_priority,min_severity,priority,severity,expected_create",
+    [
+        # No thresholds configured: today's behavior.
+        (None, None, "", "--", True),
+        # At or above the priority bar.
+        ("P2", None, "P1", "--", True),
+        ("P2", None, "P2", "--", True),
+        # Below the priority bar.
+        ("P2", None, "P3", "--", False),
+        # Unset priority counts as below the bar (pre-triage bugs stay out).
+        ("P2", None, "", "--", False),
+        ("P2", None, "--", "--", False),
+        # Severity behaves the same way.
+        (None, "S2", "", "S1", True),
+        (None, "S2", "", "S3", False),
+        (None, "S2", "", "N/A", False),
+        # Both configured: both must be met.
+        ("P2", "S2", "P1", "S1", True),
+        ("P2", "S2", "P1", "S3", False),
+        ("P2", "S2", "P3", "S1", False),
+    ],
+)
+def test_priority_severity_threshold_gate(
+    webhook_request_factory,
+    action_factory,
+    mocked_jira,
+    mocked_bugzilla,
+    min_priority,
+    min_severity,
+    priority,
+    severity,
+    expected_create,
+):
+    action = action_factory(
+        whiteboard_tag="devtest",
+        parameters__jira_project_key="JBI",
+        parameters__min_priority=min_priority,
+        parameters__min_severity=min_severity,
+    )
+    actions = Actions(root=[action])
+    webhook = webhook_request_factory(
+        bug__priority=priority, bug__severity=severity, bug__see_also=[]
+    )
+    mocked_bugzilla.get_bug.return_value = webhook.bug
+
+    execute_action(request=webhook, actions=actions)
+
+    assert mocked_jira.create_issue.called is expected_create
+
+
+def test_threshold_gate_does_not_apply_to_already_linked_bugs(
+    webhook_request_factory,
+    action_factory,
+    mocked_jira,
+    mocked_bugzilla,
+    settings,
+):
+    """Once a bug has a linked Jira issue we keep syncing it even if it is
+    below the threshold: silently stranding an existing issue is worse than
+    never having created it."""
+    action = action_factory(
+        whiteboard_tag="devtest",
+        parameters__jira_project_key="JBI",
+        parameters__min_priority="P1",
+    )
+    actions = Actions(root=[action])
+    webhook = webhook_request_factory(
+        bug__priority="P5",
+        bug__see_also=[f"{settings.jira_base_url}browse/JBI-234"],
+        event__action="modify",
+        event__routing_key="bug.modify:assigned_to",
+        event__changes=[
+            factories.WebhookEventChangeFactory(
+                field="summary", removed="old", added="new"
+            )
+        ],
+    )
+    mocked_bugzilla.get_bug.return_value = webhook.bug
+    mocked_jira.get_issue.return_value = {"fields": {"project": {"key": "JBI"}}}
+
+    execute_action(request=webhook, actions=actions)
+
+    assert not mocked_jira.create_issue.called
+    assert mocked_jira.update_issue_field.called
+
+
+def test_below_threshold_bug_is_logged_as_ignored(
+    webhook_request_factory, action_factory, mocked_jira, mocked_bugzilla, capturelogs
+):
+    action = action_factory(
+        whiteboard_tag="devtest",
+        parameters__jira_project_key="JBI",
+        parameters__min_priority="P1",
+    )
+    actions = Actions(root=[action])
+    webhook = webhook_request_factory(bug__priority="P4", bug__see_also=[])
+    mocked_bugzilla.get_bug.return_value = webhook.bug
+
+    with capturelogs.for_logger("jbi.runner").at_level(logging.INFO):
+        execute_action(request=webhook, actions=actions)
+
+    assert any(
+        "below the sync threshold" in record.message for record in capturelogs.records
+    )
+    assert not mocked_jira.create_issue.called

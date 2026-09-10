@@ -273,3 +273,19 @@ def test_extract_from_see_also_none_filters_non_jira_urls(bug_factory):
     )
     result = bug.extract_from_see_also(project_key=None)
     assert result == ["JBI-123", "FIDEFE-456"]
+
+
+@pytest.mark.parametrize("value", ["P0", "p1", "high", "S1", ""])
+def test_invalid_min_priority_is_rejected(value):
+    """R-04 thresholds are compared against BMO's fixed priority vocabulary,
+    so a typo in config must fail at load rather than silently never match."""
+    with pytest.raises(ValueError) as exc_info:
+        ActionParams(jira_project_key="JBI", min_priority=value)
+    assert "min_priority" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("value", ["S0", "s1", "critical", "P1", ""])
+def test_invalid_min_severity_is_rejected(value):
+    with pytest.raises(ValueError) as exc_info:
+        ActionParams(jira_project_key="JBI", min_severity=value)
+    assert "min_severity" in str(exc_info.value)
