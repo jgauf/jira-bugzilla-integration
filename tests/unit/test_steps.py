@@ -3576,3 +3576,135 @@ def test_create_issue_skips_creation_when_issue_exists(
     mocked_jira.update_issue_field.assert_called_once_with(
         key="JBI-234", fields={"summary": mock.ANY}
     )
+
+
+# --- R-02 / R-03: Phabricator review state (plan D4, D5) --------------------
+
+
+@pytest.fixture
+def phabricator_patch_context(action_context_factory):
+    """An attachment event carrying a fresh Phabricator patch on a linked bug."""
+    return action_context_factory(
+        operation=Operation.ATTACHMENT,
+        bug__with_attachment=True,
+        bug__id=5555,
+        bug__attachment__is_patch=True,
+        bug__attachment__is_obsolete=False,
+        bug__attachment__content_type="text/x-phabricator-request",
+        bug__attachment__file_name="phabricator-D1234-url.txt",
+        event__target="attachment",
+        jira__issue="JBI-234",
+        current_step="maybe_update_issue_status_on_patch",
+    )
+
+
+def _issue_with_category(category_key):
+    return {"fields": {"status": {"statusCategory": {"key": category_key}}}}
+
+
+def test_patch_moves_issue_to_review_status(
+    phabricator_patch_context, mocked_jira, action_params_factory
+):
+    mocked_jira.get_issue.return_value = _issue_with_category("indeterminate")
+
+    result, _ = steps.maybe_update_issue_status_on_patch(
+        phabricator_patch_context,
+        parameters=action_params_factory(phabricator_review_status="In Review"),
+        jira_service=JiraService(mocked_jira),
+    )
+
+    assert result == steps.StepStatus.SUCCESS
+    mocked_jira.set_issue_status.assert_called_once_with("JBI-234", "In Review")
+
+
+def test_patch_does_nothing_without_configured_status(
+    phabricator_patch_context, mocked_jira, action_params_factory
+):
+    """The step is inert until an action configures the target status, which is
+    what keeps it default-OFF for every project in config today."""
+    result, _ = steps.maybe_update_issue_status_on_patch(
+        phabricator_patch_context,
+        parameters=action_params_factory(),
+        jira_service=JiraService(mocked_jira),
+    )
+
+    assert result == steps.StepStatus.NOOP
+    assert not mocked_jira.set_issue_status.called
+
+
+def test_patch_does_not_reopen_a_closed_issue(
+    phabricator_patch_context, mocked_jira, action_params_factory
+):
+    mocked_jira.get_issue.return_value = _issue_with_category("done")
+
+    result, _ = steps.maybe_update_issue_status_on_patch(
+        phabricator_patch_context,
+        parameters=action_params_factory(phabricator_review_status="In Review"),
+        jira_service=JiraService(mocked_jira),
+    )
+
+    assert result == steps.StepStatus.NOOP
+    assert not mocked_jira.set_issue_status.called
+
+
+def test_obsolete_patch_does_not_move_issue_to_review(
+    action_context_factory, mocked_jira, action_params_factory
+):
+    context = action_context_factory(
+        operation=Operation.ATTACHMENT,
+        bug__with_attachment=True,
+        bug__attachment__is_obsolete=True,
+        bug__attachment__content_type="text/x-phabricator-request",
+        bug__attachment__file_name="phabricator-D1234-url.txt",
+        event__target="attachment",
+        jira__issue="JBI-234",
+        current_step="maybe_update_issue_status_on_patch",
+    )
+    mocked_jira.get_issue.return_value = _issue_with_category("indeterminate")
+
+    result, _ = steps.maybe_update_issue_status_on_patch(
+        context,
+        parameters=action_params_factory(phabricator_review_status="In Review"),
+        jira_service=JiraService(mocked_jira),
+    )
+
+    assert result == steps.StepStatus.NOOP
+    assert not mocked_jira.set_issue_status.called
+
+
+def test_non_phabricator_attachment_does_not_move_issue_to_review(
+    action_context_factory, mocked_jira, action_params_factory
+):
+    context = action_context_factory(
+        operation=Operation.ATTACHMENT,
+        bug__with_attachment=True,
+        bug__attachment__content_type="text/plain",
+        bug__attachment__file_name="log.txt",
+        event__target="attachment",
+        jira__issue="JBI-234",
+        current_step="maybe_update_issue_status_on_patch",
+    )
+
+    result, _ = steps.maybe_update_issue_status_on_patch(
+        context,
+        parameters=action_params_factory(phabricator_review_status="In Review"),
+        jira_service=JiraService(mocked_jira),
+    )
+
+    assert result == steps.StepStatus.NOOP
+    assert not mocked_jira.set_issue_status.called
+
+
+def test_status_category_helper_returns_none_for_unreadable_issue(
+    action_context_factory, mocked_jira
+):
+    """`get_issue` returns None for a 404, and the terminal-state guard must
+    not treat that as "closed" (nor blow up)."""
+    context = action_context_factory(jira__issue="JBI-234")
+    service = JiraService(mocked_jira)
+    mocked_jira.get_issue.side_effect = requests.HTTPError(
+        response=mock.MagicMock(status_code=404)
+    )
+
+    assert service.get_issue_status_category(context, "JBI-234") is None
+    assert service.issue_is_in_terminal_state(context, "JBI-234") is False

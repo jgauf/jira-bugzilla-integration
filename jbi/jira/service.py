@@ -301,6 +301,31 @@ class JiraService:
         )
         return response
 
+    def get_issue_status_category(
+        self, context: ActionContext, issue_key: str
+    ) -> Optional[str]:
+        """Return the issue's status category key, or `None` if unavailable.
+
+        Jira statuses are per-project and freely renamed, but every status
+        belongs to one of three built-in categories (`new`, `indeterminate`,
+        `done`). Callers use this to reason about an issue's state without
+        knowing a project's workflow -- eg. "is this issue already closed?".
+        """
+        issue = self.get_issue(context, issue_key)
+        if not issue:
+            return None
+        category = (
+            issue.get("fields", {}).get("status", {}).get("statusCategory", {}) or {}
+        )
+        key = category.get("key")
+        return str(key) if key else None
+
+    def issue_is_in_terminal_state(
+        self, context: ActionContext, issue_key: str
+    ) -> bool:
+        """Return True when the issue is in a `done`-category status."""
+        return self.get_issue_status_category(context, issue_key) == "done"
+
     def update_issue_status(self, context: ActionContext, jira_status: str):
         """Update the status of the Jira issue"""
         issue_key = context.jira.issue

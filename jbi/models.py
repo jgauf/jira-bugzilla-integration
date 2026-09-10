@@ -155,6 +155,11 @@ class ActionParams(BaseModel, frozen=True):
     # which preserves today's email-only lookup in `find_jira_user`.
     identity_map_enabled: bool = False
 
+    # R-02 / R-03: Jira statuses used by the Phabricator review steps. `None`
+    # (the default) means the corresponding step does nothing, so adding the
+    # steps to an action's config without setting these is inert.
+    phabricator_review_status: Optional[str] = None
+
     # Enables the Jira -> BMO inbound path (the `/jira_webhook` spine and its
     # reverse field writers) for this action. Defaults to off: no inbound
     # Jira event has any effect until an action opts in.

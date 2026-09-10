@@ -176,6 +176,52 @@ def maybe_add_phabricator_link(
     return (StepStatus.NOOP, context)
 
 
+def maybe_update_issue_status_on_patch(
+    context: ActionContext,
+    *,
+    parameters: ActionParams,
+    jira_service: JiraService,
+) -> StepResult:
+    """Move the Jira issue to the configured review status when a patch is posted (R-02).
+
+    Jira should reflect that code review is the real state of the work as soon
+    as a Phabricator patch is attached to the bug. Inert unless the action
+    configures `phabricator_review_status`.
+    """
+    target_status = parameters.phabricator_review_status
+    if not target_status:
+        return (StepStatus.NOOP, context)
+
+    if context.event.target != "attachment" or not context.bug.attachment:
+        return (StepStatus.NOOP, context)
+
+    attachment = context.bug.attachment
+    if not attachment.is_phabricator_patch():
+        return (StepStatus.NOOP, context)
+
+    if attachment.is_obsolete:
+        # An abandoned patch is not a request for review.
+        return (StepStatus.NOOP, context)
+
+    issue_key = context.jira.issue
+    assert issue_key  # Attachment events only run on linked bugs.
+
+    if jira_service.issue_is_in_terminal_state(context, issue_key):
+        # Never drag a closed issue back into review: the bug may have been
+        # resolved while a stale patch was still being attached.
+        logger.info(
+            "Issue %s is in a terminal state, not moving it to %r",
+            issue_key,
+            target_status,
+            extra=context.update(operation=Operation.IGNORE).model_dump(),
+        )
+        return (StepStatus.NOOP, context)
+
+    resp = jira_service.update_issue_status(context, target_status)
+    context = context.append_responses(resp)
+    return (StepStatus.SUCCESS, context)
+
+
 def maybe_delete_duplicate(
     context: ActionContext,
     *,

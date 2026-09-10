@@ -69,6 +69,15 @@ class WebhookCommentFactory(PydanticFactory):
     creation_time = None
 
 
+class AttachmentFlagFactory(PydanticFactory):
+    class Meta:
+        model = bugzilla_models.AttachmentFlag
+
+    id = 1
+    name = "review"
+    value = "?"
+
+
 class WebhookAttachmentFactory(PydanticFactory):
     class Meta:
         model = bugzilla_models.WebhookAttachment
