@@ -22,6 +22,11 @@ from jbi.identity import UNASSIGNED_EMAIL, get_identity_map
 from jbi.jira_inbound.models import JiraWebhookRequest
 from jbi.models import Action, Context
 from jbi.visibility import can_write_comment
+from jbi.writeback import (
+    bmo_wins_conflict,
+    is_writeback_allowed,
+    suppressed_fields,
+)
 
 if TYPE_CHECKING:
     from jbi.bugzilla.service import BugzillaService
@@ -152,13 +157,50 @@ def invert_priority_map(priority_map: dict[str, str]) -> dict[str, str]:
 
 
 def _changed(context: ReverseContext, field: str) -> bool:
-    """Return True when the inbound event changed the given Jira field.
+    """Return True when the event changed a field we are allowed to write.
 
-    Reverse steps only act on what actually changed. Writing every field on
-    every event would let a Jira edit of one field silently overwrite BMO
-    values a human had just changed by hand.
+    Two rules in one place: reverse steps act only on what actually changed
+    (writing every field on every event would let a Jira edit of one field
+    overwrite BMO values a human had just set by hand), and only on fields
+    the write-back policy allows (`jbi.writeback`).
     """
+    if not is_writeback_allowed(field):
+        return False
     return field in context.event.changed_fields()
+
+
+def _previous_jira_value(context: ReverseContext, field: str) -> Optional[str]:
+    """Return what the field was before this change, per Jira's changelog."""
+    if not context.event.changelog:
+        return None
+    for item in context.event.changelog.items:
+        if item.field == field:
+            return item.fromString
+    return None
+
+
+def _skip_on_conflict(
+    context: ReverseContext, field: str, bmo_current: Optional[str]
+) -> bool:
+    """Return True when BMO changed independently, so BMO wins (section 4).
+
+    Logged rather than silent: a dropped write is exactly the kind of thing
+    someone will later ask "why didn't that sync?" about.
+    """
+    previous = _previous_jira_value(context, field)
+    if not bmo_wins_conflict(previous, bmo_current):
+        return False
+
+    logger.info(
+        "Bug %s %s changed independently (BMO %r, Jira had %r); "
+        "BMO wins, not overwriting",
+        context.bug.id,
+        field,
+        bmo_current,
+        previous,
+        extra=context.model_dump(),
+    )
+    return True
 
 
 def writeback_status(
@@ -221,6 +263,19 @@ def writeback_priority(
         )
         return (ReverseStepStatus.INCOMPLETE, context)
 
+    previous_jira = _previous_jira_value(context, "priority")
+    previous_bmo = inverted.get(previous_jira) if previous_jira else None
+    if previous_bmo is not None and bmo_wins_conflict(
+        previous_bmo, context.bug.priority
+    ):
+        logger.info(
+            "Bug %s priority changed independently (BMO %r); BMO wins",
+            context.bug.id,
+            context.bug.priority,
+            extra=context.model_dump(),
+        )
+        return (ReverseStepStatus.NOOP, context)
+
     response = bugzilla_service.set_priority(context.bug, bmo_priority)
     if response is None:
         return (ReverseStepStatus.NOOP, context)
@@ -273,6 +328,9 @@ def writeback_summary(
     fields = context.event.issue.fields if context.event.issue else None
     summary = fields.summary if fields else None
     if not summary:
+        return (ReverseStepStatus.NOOP, context)
+
+    if _skip_on_conflict(context, "summary", context.bug.summary):
         return (ReverseStepStatus.NOOP, context)
 
     response = bugzilla_service.set_summary(context.bug, summary)
@@ -366,6 +424,19 @@ class ReverseExecutor:
 
     def __call__(self, context: ReverseContext) -> dict:
         results: dict[str, str] = {}
+
+        # R-07: planning fields are Jira's to own. Logged rather than dropped
+        # in silence, so "the epic moved and BMO did not change" is
+        # observable instead of merely asserted.
+        suppressed = suppressed_fields(context.event.changed_fields())
+        if suppressed:
+            logger.info(
+                "Ignoring Jira-owned fields %s on issue %s",
+                ", ".join(suppressed),
+                context.issue_key,
+                extra=context.model_dump(),
+            )
+
         for step in REVERSE_STEPS:
             context = context.update(current_step=step.__name__)
             status, context = step(

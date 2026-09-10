@@ -476,7 +476,11 @@ def test_summary_is_written_back(
         bug_factory,
         jira_webhook_request_factory,
         bug_kwargs={"summary": "Old title"},
-        changelog__items=[jira_changelog_item_factory(field="summary")],
+        changelog__items=[
+            jira_changelog_item_factory(
+                field="summary", fromString="Old title", toString="New title"
+            )
+        ],
         issue__fields__summary="New title",
     )
 
@@ -664,3 +668,152 @@ def test_duplicate_comment_is_not_posted_twice(
 
     assert status == ReverseStepStatus.NOOP
     assert not mocked_bugzilla.update_bug.called
+
+
+# --- Field ownership & conflict policy (plan section 4, D11) ---------------
+
+
+def test_summary_conflict_resolves_to_the_bmo_value(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+    jira_changelog_item_factory,
+    capturelogs,
+):
+    """Both sides edited before sync reconciled: BMO is authoritative for
+    execution fields, so the Jira value must not clobber it."""
+    import logging
+
+    context = make_context(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        # BMO now says "Edited in BMO", but Jira thinks the previous value was
+        # still "Old title" -- so BMO moved independently.
+        bug_kwargs={"summary": "Edited in BMO"},
+        changelog__items=[
+            jira_changelog_item_factory(
+                field="summary", fromString="Old title", toString="Edited in Jira"
+            )
+        ],
+        issue__fields__summary="Edited in Jira",
+    )
+
+    with capturelogs.for_logger("jbi.jira_steps").at_level(logging.INFO):
+        status, _ = jira_steps.writeback_summary(
+            context, bugzilla_service=mocked_service
+        )
+
+    assert status == ReverseStepStatus.NOOP
+    assert not mocked_bugzilla.update_bug.called
+    assert any("BMO wins" in record.message for record in capturelogs.records)
+
+
+def test_priority_conflict_resolves_to_the_bmo_value(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+    jira_changelog_item_factory,
+):
+    context = make_context(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        bug_kwargs={"priority": "P1"},
+        changelog__items=[
+            jira_changelog_item_factory(
+                field="priority", fromString="P3", toString="P2"
+            )
+        ],
+        issue__fields__priority=JiraNamedValue(name="P2"),
+    )
+
+    status, _ = jira_steps.writeback_priority(context, bugzilla_service=mocked_service)
+
+    assert status == ReverseStepStatus.NOOP
+    assert not mocked_bugzilla.update_bug.called
+
+
+def test_write_proceeds_when_no_previous_value_is_known(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+    jira_changelog_item_factory,
+):
+    """Conflict detection needs Jira's previous value; without it, syncing
+    must continue rather than silently stop."""
+    context = make_context(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        bug_kwargs={"summary": "Old title"},
+        changelog__items=[
+            jira_changelog_item_factory(field="summary", fromString=None)
+        ],
+        issue__fields__summary="New title",
+    )
+
+    status, _ = jira_steps.writeback_summary(context, bugzilla_service=mocked_service)
+
+    assert status == ReverseStepStatus.SUCCESS
+
+
+@pytest.mark.parametrize(
+    "field", ["Sprint", "Story Points", "Epic Link", "parent", "labels", "Rank"]
+)
+def test_planning_field_changes_write_nothing(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+    jira_changelog_item_factory,
+    field,
+):
+    """R-07: re-parenting or re-planning in Jira never touches BMO."""
+    context = make_context(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        changelog__items=[jira_changelog_item_factory(field=field)],
+    )
+
+    from jbi.jira_steps import ReverseExecutor
+
+    ReverseExecutor(bugzilla_service=mocked_service)(context)
+
+    assert not mocked_bugzilla.update_bug.called
+
+
+def test_suppressed_planning_fields_are_logged(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    capturelogs,
+    jira_changelog_item_factory,
+):
+    import logging
+
+    from jbi.jira_steps import ReverseExecutor
+
+    context = make_context(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        changelog__items=[
+            jira_changelog_item_factory(field="Sprint"),
+            jira_changelog_item_factory(field="summary"),
+        ],
+    )
+
+    with capturelogs.for_logger("jbi.jira_steps").at_level(logging.INFO):
+        ReverseExecutor(bugzilla_service=mocked_service)(context)
+
+    assert any("Jira-owned fields" in record.message for record in capturelogs.records)
