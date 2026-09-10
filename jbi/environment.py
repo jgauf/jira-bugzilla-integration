@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     bugzilla_base_url: str = "https://bugzilla-dev.allizom.org"
     bugzilla_api_key: str
 
+    # Identity of JBI's own service accounts, used to suppress the events its
+    # own writes generate (Invariant C of the bidirectional sync plan). Unset
+    # means "no suppression", which is today's behavior.
+    jira_bot_account_id: Optional[str] = None
+    bugzilla_bot_login: Optional[str] = None
+
     # Phabricator
     phabricator_base_url: str = "https://phabricator.services.mozilla.com"
 

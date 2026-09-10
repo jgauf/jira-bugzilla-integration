@@ -70,6 +70,15 @@ register(factories.WebhookEventChangeFactory)
 register(factories.WebhookRequestFactory, "bugzilla_webhook_request")
 register(factories.WebhookUserFactory)
 register(factories.QueueItemFactory)
+register(factories.JiraUserFactory)
+register(factories.JiraStatusCategoryFactory)
+register(factories.JiraStatusFactory)
+register(factories.JiraIssueFieldsFactory)
+register(factories.JiraIssueFactory)
+register(factories.JiraChangelogItemFactory)
+register(factories.JiraChangelogFactory)
+register(factories.JiraCommentFactory)
+register(factories.JiraWebhookRequestFactory, "jira_webhook_event")
 
 
 register(

@@ -2,6 +2,7 @@
 Core FastAPI app (setup, middleware)
 """
 
+import logging
 import secrets
 from pathlib import Path
 from typing import Annotated, Any, Optional
@@ -17,6 +18,9 @@ from jbi.bugzilla import models as bugzilla_models
 from jbi.bugzilla import service as bugzilla_service
 from jbi.configuration import get_actions
 from jbi.environment import Settings, get_settings
+from jbi.errors import IgnoreInvalidRequestError
+from jbi.jira_inbound import models as jira_inbound_models
+from jbi.jira_inbound.handler import execute_jira_event
 from jbi.models import Actions
 from jbi.queue import DeadLetterQueue, get_dl_queue
 from jbi.runner import execute_or_queue
@@ -27,6 +31,8 @@ BugzillaServiceDep = Annotated[
     bugzilla_service.BugzillaService, Depends(bugzilla_service.get_service)
 ]
 JiraServiceDep = Annotated[jira.JiraService, Depends(jira.get_service)]
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -77,6 +83,29 @@ async def bugzilla_webhook(
 ):
     """API endpoint that Bugzilla Webhook Events request"""
     return await execute_or_queue(webhook_request, queue, actions)
+
+
+@router.post(
+    "/jira_webhook",
+    dependencies=[Depends(api_key_auth)],
+)
+async def jira_webhook(
+    actions: ActionsDep,
+    jira_event: jira_inbound_models.JiraWebhookRequest = Body(..., embed=False),
+):
+    """API endpoint that the central Jira Automation rule posts to.
+
+    Isolated from `/bugzilla_webhook` on purpose (plan constraint 6.2): the
+    reverse direction cannot destabilize the forward one. Events JBI does not
+    act on -- the overwhelming majority -- are reported as `ignored` rather
+    than as errors, since Jira Automation forwards far more than JBI handles.
+    """
+    try:
+        details = execute_jira_event(jira_event, actions)
+    except IgnoreInvalidRequestError as exc:
+        logger.info("Ignore inbound Jira event: %s", exc)
+        return {"status": "ignored", "reason": str(exc)}
+    return {"status": "handled", "details": details}
 
 
 @router.get(

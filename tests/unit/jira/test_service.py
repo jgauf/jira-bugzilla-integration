@@ -1,4 +1,5 @@
 import logging
+from unittest import mock
 
 import pytest
 import requests
@@ -1197,3 +1198,59 @@ def test_delete_issue_link_causes_ignores_other_link_types(
 
     # Only the GET, no DELETE
     assert len(mocked_responses.calls) == 1
+
+
+# --- Correlation: Jira issue -> Bugzilla bug (plan D6) ----------------------
+
+
+def test_get_linked_bugzilla_bug_id_from_global_id(mocked_jira):
+    """JBI writes the bug id as the remote link's globalId, so that is the
+    authoritative issue -> bug direction."""
+    service = jira.JiraService(mocked_jira)
+    mocked_jira.get_issue_remote_links.return_value = [
+        {
+            "globalId": "654321",
+            "object": {"url": "https://bugzilla/show_bug.cgi?id=654321"},
+        }
+    ]
+
+    assert service.get_linked_bugzilla_bug_id("JBI-234") == 654321
+
+
+def test_get_linked_bugzilla_bug_id_falls_back_to_url(mocked_jira):
+    """Links added by hand have no numeric globalId; parse the URL instead."""
+    service = jira.JiraService(mocked_jira)
+    mocked_jira.get_issue_remote_links.return_value = [
+        {"globalId": "some-other-system", "object": {"url": "https://phabricator/D1"}},
+        {"object": {"url": "https://bugzilla.mozilla.org/show_bug.cgi?id=987"}},
+    ]
+
+    assert service.get_linked_bugzilla_bug_id("JBI-234") == 987
+
+
+def test_get_linked_bugzilla_bug_id_returns_none_without_bugzilla_link(mocked_jira):
+    service = jira.JiraService(mocked_jira)
+    mocked_jira.get_issue_remote_links.return_value = [
+        {"globalId": "abc", "object": {"url": "https://example.com/thing"}}
+    ]
+
+    assert service.get_linked_bugzilla_bug_id("JBI-234") is None
+
+
+def test_get_linked_bugzilla_bug_id_returns_none_for_missing_issue(mocked_jira):
+    service = jira.JiraService(mocked_jira)
+    mocked_jira.get_issue_remote_links.side_effect = requests.HTTPError(
+        response=mock.MagicMock(status_code=404)
+    )
+
+    assert service.get_linked_bugzilla_bug_id("JBI-999") is None
+
+
+def test_get_linked_bugzilla_bug_id_reraises_other_errors(mocked_jira):
+    service = jira.JiraService(mocked_jira)
+    mocked_jira.get_issue_remote_links.side_effect = requests.HTTPError(
+        response=mock.MagicMock(status_code=500)
+    )
+
+    with pytest.raises(requests.HTTPError):
+        service.get_linked_bugzilla_bug_id("JBI-234")

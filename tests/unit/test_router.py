@@ -549,3 +549,67 @@ def test_lbheartbeat(anon_client, method):
 
     resp = anon_client.request(method, "__lbheartbeat__")
     assert resp.status_code == 200
+
+
+# --- Inbound Jira endpoint (plan D6) ----------------------------------------
+
+
+def test_jira_webhook_requires_api_key(anon_client, jira_webhook_event):
+    """Auth parity with /bugzilla_webhook: the new endpoint is not a hole."""
+    response = anon_client.post(
+        "/jira_webhook",
+        content=jira_webhook_event.model_dump_json(),
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_jira_webhook_reports_ignored_events_as_ok(
+    authenticated_client, mocked_jira, jira_webhook_event
+):
+    """An event JBI does not act on is normal traffic, not an error: Jira
+    Automation forwards far more events than JBI handles."""
+    mocked_jira.get_issue_remote_links.return_value = []
+
+    response = authenticated_client.post(
+        "/jira_webhook",
+        content=jira_webhook_event.model_dump_json(),
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ignored"
+    assert "no Bugzilla bug linked" in response.json()["reason"]
+
+
+def test_jira_webhook_tolerates_unknown_payload_keys(authenticated_client, mocked_jira):
+    """The Automation rule's payload shape is not fully under our control, so
+    unknown keys must be ignored rather than rejected with a 422."""
+    mocked_jira.get_issue_remote_links.return_value = []
+
+    response = authenticated_client.post(
+        "/jira_webhook",
+        json={
+            "webhookEvent": "jira:issue_updated",
+            "issue": {"key": "JBI-234", "fields": {"summary": "hi", "votes": 3}},
+            "somethingNew": {"nested": True},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ignored"
+
+
+def test_jira_webhook_does_not_touch_the_bugzilla_path(
+    authenticated_client, mocked_jira, mocked_bugzilla, jira_webhook_event
+):
+    mocked_jira.get_issue_remote_links.return_value = []
+
+    authenticated_client.post(
+        "/jira_webhook",
+        content=jira_webhook_event.model_dump_json(),
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert not mocked_bugzilla.update_bug.called

@@ -9,6 +9,7 @@ import json
 import logging
 from functools import lru_cache
 from typing import Any, Iterable, Optional, cast
+from urllib.parse import parse_qs, urlparse
 
 import requests
 from dockerflow import checks
@@ -238,6 +239,35 @@ class JiraService:
             icon_url=icon_url,
             icon_title=icon_url,
         )
+
+    def get_linked_bugzilla_bug_id(self, issue_key: str) -> Optional[int]:
+        """Return the Bugzilla bug id linked to a Jira issue, or `None`.
+
+        JBI writes this link itself on every issue it creates
+        (`add_link_to_bugzilla`), using the bug id as the remote link's
+        `globalId`, so it is the authoritative issue -> bug direction. The
+        link URL is parsed as a fallback for issues linked by hand.
+        """
+        try:
+            links = self.client.get_issue_remote_links(issue_key)
+        except requests_exceptions.HTTPError as exc:
+            if getattr(exc.response, "status_code", None) != 404:
+                raise
+            logger.error("Could not read remote links of issue %s", issue_key)
+            return None
+
+        for link in links or []:
+            global_id = str(link.get("globalId") or "")
+            if global_id.isdigit():
+                return int(global_id)
+
+            url = (link.get("object") or {}).get("url") or ""
+            if "show_bug.cgi" in url:
+                bug_ids = parse_qs(urlparse(url).query).get("id") or []
+                if bug_ids and bug_ids[0].isdigit():
+                    return int(bug_ids[0])
+
+        return None
 
     def clear_assignee(self, context: ActionContext):
         """Clear the assignee of the specified Jira issue."""
