@@ -20,6 +20,7 @@ from requests import exceptions as requests_exceptions
 from jbi import Operation
 from jbi.bugzilla.models import JIRA_HOSTNAMES, WebhookAttachment
 from jbi.environment import get_settings
+from jbi.identity import get_identity_map
 
 
 class StepStatus(Enum):
@@ -320,8 +321,27 @@ def add_jira_comments_for_changes(
     return (StepStatus.SUCCESS, context)
 
 
+def _assign_from_identity_map(
+    context: ActionContext, parameters: ActionParams, jira_service: JiraService
+):
+    """Assign via the identity map, or return `None` to fall through (R-11).
+
+    Tier 1 of the resolution cascade documented in `jbi.identity`. Returning
+    `None` -- rather than raising -- is what makes the cascade a cascade: an
+    unmapped person is the normal case, not a failure.
+    """
+    if not parameters.identity_map_enabled:
+        return None
+
+    account_id = get_identity_map().jira_account_id_for(context.bug.assigned_to)
+    if not account_id:
+        return None
+
+    return jira_service.assign_jira_user_by_account_id(context, account_id)
+
+
 def maybe_assign_jira_user(
-    context: ActionContext, *, jira_service: JiraService
+    context: ActionContext, *, parameters: ActionParams, jira_service: JiraService
 ) -> StepResult:
     """Assign the user on the Jira issue, based on the Bugzilla assignee email.
 
@@ -338,7 +358,9 @@ def maybe_assign_jira_user(
             return (StepStatus.NOOP, context)
 
         try:
-            resp = jira_service.assign_jira_user(context, bug.assigned_to)  # type: ignore
+            resp = _assign_from_identity_map(
+                context, parameters, jira_service
+            ) or jira_service.assign_jira_user(context, bug.assigned_to)  # type: ignore
             context.append_responses(resp)
             return (StepStatus.SUCCESS, context)
         except ValueError as exc:
@@ -353,7 +375,9 @@ def maybe_assign_jira_user(
             resp = jira_service.clear_assignee(context)
         else:
             try:
-                resp = jira_service.assign_jira_user(context, bug.assigned_to)  # type: ignore
+                resp = _assign_from_identity_map(
+                    context, parameters, jira_service
+                ) or jira_service.assign_jira_user(context, bug.assigned_to)  # type: ignore
             except ValueError as exc:
                 logger.info(str(exc), extra=context.model_dump())
                 # If that failed then just fall back to clearing the assignee.

@@ -283,6 +283,25 @@ class JiraService:
             raise ValueError(f"User {email} not found")
         return users[0]
 
+    def assign_jira_user_by_account_id(self, context: ActionContext, account_id: str):
+        """Set the assignee from a known Jira accountId, raise if it fails.
+
+        Used when the identity map resolved the person already (R-11 tier 1),
+        so no email lookup is needed -- which is the whole point for users
+        whose Jira email is hidden or differs from their BMO one.
+        """
+        issue_key = context.jira.issue
+        assert issue_key  # Until we have more fine-grained typing of contexts
+
+        try:
+            return self.update_issue_field(
+                context, "assignee", account_id, wrap_value="accountId"
+            )
+        except (requests_exceptions.HTTPError, IOError) as exc:
+            raise ValueError(
+                f"Could not assign {account_id} to issue {issue_key}"
+            ) from exc
+
     def assign_jira_user(self, context: ActionContext, email: str):
         """Set the assignee of the specified Jira issue, raise if fails."""
         issue_key = context.jira.issue

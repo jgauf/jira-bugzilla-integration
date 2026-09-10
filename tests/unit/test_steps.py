@@ -508,7 +508,9 @@ def test_set_assignee_failing_create(
 
     with capturelogs.for_logger("jbi.steps").at_level(logging.DEBUG):
         result, _ = steps.maybe_assign_jira_user(
-            context=action_context, jira_service=JiraService(mocked_jira)
+            context=action_context,
+            parameters=action_context.action.parameters,
+            jira_service=JiraService(mocked_jira),
         )
         assert result == steps.StepStatus.INCOMPLETE
 
@@ -538,7 +540,9 @@ def test_set_assignee_failing_update(
 
     with capturelogs.for_logger("jbi.steps").at_level(logging.DEBUG):
         steps.maybe_assign_jira_user(
-            context=action_context, jira_service=JiraService(mocked_jira)
+            context=action_context,
+            parameters=action_context.action.parameters,
+            jira_service=JiraService(mocked_jira),
         )
 
     assert capturelogs.messages == ["User postmaster@localhost not found"]
