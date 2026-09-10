@@ -18,6 +18,7 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING, Callable, Optional
 
 from jbi.bugzilla.models import Bug
+from jbi.identity import UNASSIGNED_EMAIL, get_identity_map
 from jbi.jira_inbound.models import JiraWebhookRequest
 from jbi.models import Action, Context
 
@@ -58,10 +59,234 @@ class ReverseContext(Context, extra="forbid"):
 ReverseStepResult = tuple[ReverseStepStatus, ReverseContext]
 ReverseStep = Callable[..., ReverseStepResult]
 
-# The reverse pipeline. Field writers are appended by later deliverables
-# (D9/D10); D6 ships the spine with an empty pipeline so the endpoint can be
-# merged, exercised and observed before it is able to write anything at all.
-REVERSE_STEPS: list[ReverseStep] = []
+# --- Reverse status & resolution mapping (plan section 4.1) ----------------
+#
+# `status_map` (BMO -> Jira) is many-to-one -- in prod, ten BMO
+# status/resolution values collapse onto a single Jira status -- so it cannot
+# be inverted. Reverse status instead derives from Jira's built-in status
+# category, which exists with the same three values in every project no matter
+# how its workflow is named. That gives one project-agnostic default map
+# instead of one hand-maintained map per action.
+REVERSE_STATUS_CATEGORY_MAP = {
+    "new": "NEW",
+    "indeterminate": "ASSIGNED",
+    "done": "RESOLVED",
+}
+
+# BMO distinguishes "never worked on" from "was resolved and is open again".
+# Writing NEW over a previously-resolved bug would erase that distinction, so
+# a bug moving back out of a done state becomes REOPENED instead.
+REOPENED_STATUS = "REOPENED"
+RESOLVED_STATUSES = {"RESOLVED", "VERIFIED", "CLOSED"}
+
+
+def reverse_status_for(context: ReverseContext) -> Optional[str]:
+    """Return the BMO status this issue's status category implies."""
+    category = context.event.issue.status_category if context.event.issue else None
+    if not category:
+        return None
+
+    overrides = context.action.parameters.reverse_status_overrides
+    status = overrides.get(category) or REVERSE_STATUS_CATEGORY_MAP.get(category)
+
+    if status == "NEW" and (context.bug.status or "") in RESOLVED_STATUSES:
+        return REOPENED_STATUS
+    return status
+
+
+def invert_resolution_map(resolution_map: dict[str, str]) -> dict[str, str]:
+    """Invert a BMO -> Jira resolution map.
+
+    Safe because `ActionParams` rejects a non-injective `resolution_map` at
+    config load; this is the consumer that validation exists for.
+    """
+    return {jira: bmo for bmo, jira in resolution_map.items()}
+
+
+def reverse_resolution_for(context: ReverseContext) -> Optional[str]:
+    """Return the BMO resolution to write, or `None` to leave it untouched.
+
+    Precedence, deliberately conservative because a resolution is a factual
+    claim about *why* a bug is closed:
+
+    1. Jira's resolution field, mapped back through the inverted
+       `resolution_map`.
+    2. the action's `default_reverse_resolution`.
+    3. nothing -- write the status, leave the resolution alone, and let the
+       reconciliation report (R-13) surface it for a human. Never guess:
+       a wrong DUPLICATE or WONTFIX misleads everyone who reads the bug later.
+    """
+    fields = context.event.issue.fields if context.event.issue else None
+    jira_resolution = fields.resolution.name if fields and fields.resolution else None
+
+    if jira_resolution:
+        inverted = invert_resolution_map(context.action.parameters.resolution_map)
+        if jira_resolution in inverted:
+            return inverted[jira_resolution]
+        logger.info(
+            "Jira resolution %r is not in the inverted resolution_map of %r",
+            jira_resolution,
+            context.action.whiteboard_tag,
+            extra=context.model_dump(),
+        )
+
+    return context.action.parameters.default_reverse_resolution
+
+
+def invert_priority_map(priority_map: dict[str, str]) -> dict[str, str]:
+    """Invert a BMO -> Jira priority map, first mapping wins.
+
+    Unlike `resolution_map` this one is *not* required to be injective: the
+    default maps both "" and "--" onto Jira's "None", and both mean "unset" in
+    BMO, so collapsing them is harmless. First-wins keeps the choice
+    deterministic instead of dict-ordering-dependent in a surprising way.
+    """
+    inverted: dict[str, str] = {}
+    for bmo, jira in priority_map.items():
+        inverted.setdefault(jira, bmo)
+    return inverted
+
+
+# --- Reverse steps ----------------------------------------------------------
+
+
+def _changed(context: ReverseContext, field: str) -> bool:
+    """Return True when the inbound event changed the given Jira field.
+
+    Reverse steps only act on what actually changed. Writing every field on
+    every event would let a Jira edit of one field silently overwrite BMO
+    values a human had just changed by hand.
+    """
+    return field in context.event.changed_fields()
+
+
+def writeback_status(
+    context: ReverseContext, *, bugzilla_service: BugzillaService
+) -> ReverseStepResult:
+    """Write the Jira status (and resolution) back to BMO."""
+    if not (_changed(context, "status") or _changed(context, "resolution")):
+        return (ReverseStepStatus.NOOP, context)
+
+    status = reverse_status_for(context)
+    if not status:
+        logger.info(
+            "No BMO status for issue %s, nothing to write back",
+            context.issue_key,
+            extra=context.model_dump(),
+        )
+        return (ReverseStepStatus.INCOMPLETE, context)
+
+    resolution = None
+    if status in RESOLVED_STATUSES:
+        resolution = reverse_resolution_for(context)
+        if resolution is None:
+            logger.warning(
+                "Issue %s closed but no BMO resolution could be determined; "
+                "writing status only",
+                context.issue_key,
+                extra=context.model_dump(),
+            )
+    else:
+        # Moving a bug out of a resolved state must clear its resolution,
+        # otherwise BMO shows an open bug that still claims to be FIXED.
+        resolution = "" if context.bug.resolution else None
+
+    response = bugzilla_service.set_status_resolution(context.bug, status, resolution)
+    if response is None:
+        return (ReverseStepStatus.NOOP, context)
+    return (ReverseStepStatus.SUCCESS, context.append_responses(response))
+
+
+def writeback_priority(
+    context: ReverseContext, *, bugzilla_service: BugzillaService
+) -> ReverseStepResult:
+    """Write the Jira priority back to BMO."""
+    if not _changed(context, "priority"):
+        return (ReverseStepStatus.NOOP, context)
+
+    fields = context.event.issue.fields if context.event.issue else None
+    jira_priority = fields.priority.name if fields and fields.priority else None
+    if not jira_priority:
+        return (ReverseStepStatus.NOOP, context)
+
+    inverted = invert_priority_map(context.action.parameters.priority_map)
+    bmo_priority = inverted.get(jira_priority)
+    if bmo_priority is None:
+        logger.info(
+            "Jira priority %r has no BMO equivalent for %r",
+            jira_priority,
+            context.action.whiteboard_tag,
+            extra=context.model_dump(),
+        )
+        return (ReverseStepStatus.INCOMPLETE, context)
+
+    response = bugzilla_service.set_priority(context.bug, bmo_priority)
+    if response is None:
+        return (ReverseStepStatus.NOOP, context)
+    return (ReverseStepStatus.SUCCESS, context.append_responses(response))
+
+
+def writeback_assignee(
+    context: ReverseContext, *, bugzilla_service: BugzillaService
+) -> ReverseStepResult:
+    """Write the Jira assignee back to BMO, resolving the person first."""
+    if not _changed(context, "assignee"):
+        return (ReverseStepStatus.NOOP, context)
+
+    fields = context.event.issue.fields if context.event.issue else None
+    assignee = fields.assignee if fields else None
+
+    if assignee is None or not assignee.accountId:
+        # Unassigned in Jira: mirror that with BMO's sentinel rather than
+        # leaving a stale name on the bug.
+        email: Optional[str] = UNASSIGNED_EMAIL
+    else:
+        # Tier 1: the override map. Tier 2: the email Jira gave us, when it
+        # is not hidden. Tier 3: leave the assignee alone -- never guess.
+        email = get_identity_map().bmo_email_for(assignee.accountId)
+        if not email:
+            email = assignee.emailAddress
+        if not email:
+            logger.info(
+                "Could not resolve Jira account %s to a BMO user; "
+                "leaving the assignee of Bug %s unchanged",
+                assignee.accountId,
+                context.bug.id,
+                extra=context.model_dump(),
+            )
+            return (ReverseStepStatus.INCOMPLETE, context)
+
+    response = bugzilla_service.set_assignee(context.bug, email)
+    if response is None:
+        return (ReverseStepStatus.NOOP, context)
+    return (ReverseStepStatus.SUCCESS, context.append_responses(response))
+
+
+def writeback_summary(
+    context: ReverseContext, *, bugzilla_service: BugzillaService
+) -> ReverseStepResult:
+    """Write the Jira summary back to the BMO bug's summary."""
+    if not _changed(context, "summary"):
+        return (ReverseStepStatus.NOOP, context)
+
+    fields = context.event.issue.fields if context.event.issue else None
+    summary = fields.summary if fields else None
+    if not summary:
+        return (ReverseStepStatus.NOOP, context)
+
+    response = bugzilla_service.set_summary(context.bug, summary)
+    if response is None:
+        return (ReverseStepStatus.NOOP, context)
+    return (ReverseStepStatus.SUCCESS, context.append_responses(response))
+
+
+# The reverse pipeline, in execution order.
+REVERSE_STEPS: list[ReverseStep] = [
+    writeback_status,
+    writeback_priority,
+    writeback_assignee,
+    writeback_summary,
+]
 
 
 class ReverseExecutor:

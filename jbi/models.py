@@ -155,6 +155,13 @@ class ActionParams(BaseModel, frozen=True):
     # which preserves today's email-only lookup in `find_jira_user`.
     identity_map_enabled: bool = False
 
+    # Reverse (Jira -> BMO) status/resolution mapping, see plan section 4.1.
+    # `status_map` is many-to-one and therefore NOT invertible, so reverse
+    # status derives from Jira's built-in status category instead. These two
+    # settings only override that default behavior.
+    reverse_status_overrides: dict[str, str] = {}
+    default_reverse_resolution: Optional[str] = None
+
     # R-02 / R-03: Jira statuses used by the Phabricator review steps. `None`
     # (the default) means the corresponding step does nothing, so adding the
     # steps to an action's config without setting these is inert.
@@ -165,6 +172,48 @@ class ActionParams(BaseModel, frozen=True):
     # reverse field writers) for this action. Defaults to off: no inbound
     # Jira event has any effect until an action opts in.
     jira_inbound_enabled: bool = False
+
+    @field_validator("resolution_map")
+    @classmethod
+    def validate_resolution_map_is_invertible(cls, value: dict[str, str]):
+        """Reject a `resolution_map` that cannot be inverted (plan section 4.1).
+
+        The reverse direction recovers a BMO resolution by inverting this map,
+        which is only sound while it is injective. Every `resolution_map` in
+        config today is, so this codifies an existing property rather than
+        imposing a new one -- and a future many-to-one map fails loudly at
+        load instead of silently writing the wrong resolution to a bug.
+        """
+        seen: dict[str, str] = {}
+        collisions = []
+        for bmo_resolution, jira_resolution in value.items():
+            if jira_resolution in seen:
+                collisions.append(
+                    f"{jira_resolution!r} <- "
+                    f"{seen[jira_resolution]!r} and {bmo_resolution!r}"
+                )
+            else:
+                seen[jira_resolution] = bmo_resolution
+        if collisions:
+            raise ValueError(
+                "`resolution_map` must be invertible for reverse sync, but "
+                "these Jira resolutions map from several BMO resolutions: "
+                + "; ".join(collisions)
+            )
+        return value
+
+    @field_validator("reverse_status_overrides")
+    @classmethod
+    def validate_reverse_status_overrides(cls, value: dict[str, str]):
+        """Overrides are keyed by Jira status category, not status name."""
+        allowed = {"new", "indeterminate", "done"}
+        unknown = set(value) - allowed
+        if unknown:
+            raise ValueError(
+                "`reverse_status_overrides` keys must be Jira status "
+                f"categories {sorted(allowed)}, got {sorted(unknown)}"
+            )
+        return value
 
     @field_validator("min_priority")
     @classmethod

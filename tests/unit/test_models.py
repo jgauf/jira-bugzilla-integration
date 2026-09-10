@@ -289,3 +289,49 @@ def test_invalid_min_severity_is_rejected(value):
     with pytest.raises(ValueError) as exc_info:
         ActionParams(jira_project_key="JBI", min_severity=value)
     assert "min_severity" in str(exc_info.value)
+
+
+def test_non_invertible_resolution_map_is_rejected():
+    """The reverse direction recovers a BMO resolution by inverting this map,
+    so a many-to-one map must fail at load rather than silently write the
+    wrong resolution onto a bug (plan section 4.1)."""
+    with pytest.raises(ValueError) as exc_info:
+        ActionParams(
+            jira_project_key="JBI",
+            resolution_map={"WONTFIX": "Done", "FIXED": "Done"},
+        )
+
+    assert "invertible" in str(exc_info.value)
+
+
+def test_injective_resolution_map_is_accepted():
+    params = ActionParams(
+        jira_project_key="JBI",
+        resolution_map={"FIXED": "Done", "WONTFIX": "Won't Do"},
+    )
+
+    assert params.resolution_map["WONTFIX"] == "Won't Do"
+
+
+def test_every_real_config_resolution_map_is_invertible():
+    """All 17 prod resolution maps are injective today; this keeps them that
+    way, which is the premise the reverse resolution mapping rests on."""
+    from jbi import configuration
+
+    for config_file in (
+        "config/config.local.yaml",
+        "config/config.nonprod.yaml",
+        "config/config.prod.yaml",
+    ):
+        # Loading is the assertion: a non-invertible map raises.
+        configuration.get_actions_from_file(jbi_config_file=config_file)
+
+
+@pytest.mark.parametrize("key", ["Done", "done ", "in progress"])
+def test_reverse_status_overrides_reject_status_names(key):
+    """Overrides are keyed by status *category*, not by a project's status
+    names -- keying on names is exactly the per-project sprawl this avoids."""
+    with pytest.raises(ValueError) as exc_info:
+        ActionParams(jira_project_key="JBI", reverse_status_overrides={key: "NEW"})
+
+    assert "status" in str(exc_info.value)

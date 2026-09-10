@@ -55,9 +55,15 @@ def test_correlated_and_opted_in_event_is_handled(
 ):
     details = execute_jira_event(jira_webhook_event, inbound_actions)
 
-    # D6 ships an empty reverse pipeline: the event is accepted but nothing
-    # is written yet. The writers arrive in D9/D10.
-    assert details == {"steps": {}, "responses": []}
+    # The event passed every gate and the reverse pipeline ran. What each
+    # writer decided is asserted in tests/unit/test_jira_steps.py; here we
+    # only care that a correlated, opted-in event is dispatched at all.
+    assert set(details["steps"]) == {
+        "writeback_status",
+        "writeback_priority",
+        "writeback_assignee",
+        "writeback_summary",
+    }
 
 
 def test_uncorrelated_issue_is_ignored(
