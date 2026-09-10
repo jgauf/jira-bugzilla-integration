@@ -873,3 +873,124 @@ def test_tag_added_to_bug_with_linked_issue_triggers_resync(
     mocked_jira.update_issue_field.assert_any_call(
         key="JBI-234", fields={"summary": mock.ANY}
     )
+
+
+# --- R-01: Product/Component scope gate (plan D2) ---------------------------
+
+
+@pytest.mark.parametrize(
+    "scope,product,component,expected_sync",
+    [
+        # No scope configured: today's behavior, everything in scope.
+        (None, "Core", "Machine Learning: On-Device", True),
+        # Exact Product::Component match.
+        (
+            ["Core::Machine Learning: On-Device"],
+            "Core",
+            "Machine Learning: On-Device",
+            True,
+        ),
+        # Bare product entry matches every component of that product.
+        (["Core"], "Core", "Some Other Component", True),
+        # Case-insensitive: BMO names are display strings.
+        (
+            ["core::machine learning: on-device"],
+            "Core",
+            "Machine Learning: On-Device",
+            True,
+        ),
+        # Out of scope: same product, different component.
+        (
+            ["Core::Machine Learning: On-Device"],
+            "Core",
+            "Networking",
+            False,
+        ),
+        # Out of scope: different product entirely.
+        (["Core"], "Firefox", "General", False),
+    ],
+)
+def test_product_component_scope_gate(
+    webhook_request_factory,
+    action_factory,
+    mocked_jira,
+    mocked_bugzilla,
+    scope,
+    product,
+    component,
+    expected_sync,
+):
+    action = action_factory(
+        whiteboard_tag="devtest",
+        parameters__jira_project_key="JBI",
+        parameters__sync_products_components=scope,
+    )
+    actions = Actions(root=[action])
+    webhook = webhook_request_factory(
+        bug__product=product,
+        bug__component=component,
+        bug__see_also=[],
+    )
+    mocked_bugzilla.get_bug.return_value = webhook.bug
+
+    if expected_sync:
+        execute_action(request=webhook, actions=actions)
+        assert mocked_jira.create_issue.called
+    else:
+        with pytest.raises(IgnoreInvalidRequestError) as exc_info:
+            execute_action(request=webhook, actions=actions)
+        assert "out of scope" in str(exc_info.value)
+        assert not mocked_jira.create_issue.called
+
+
+def test_scope_gate_keeps_in_scope_actions_when_another_is_filtered_out(
+    webhook_request_factory, action_factory, mocked_jira, mocked_bugzilla
+):
+    """A bug matching two tags must still sync through the action whose scope
+    covers it, even when the other action's scope excludes the bug."""
+    in_scope = action_factory(
+        whiteboard_tag="devtest",
+        parameters__jira_project_key="JBI",
+        parameters__sync_products_components=["Core"],
+    )
+    out_of_scope = action_factory(
+        whiteboard_tag="other",
+        parameters__jira_project_key="OTHER",
+        parameters__sync_products_components=["Firefox"],
+    )
+    actions = Actions(root=[in_scope, out_of_scope])
+    webhook = webhook_request_factory(
+        bug__product="Core",
+        bug__component="General",
+        bug__whiteboard="[devtest][other]",
+        bug__see_also=[],
+    )
+    mocked_bugzilla.get_bug.return_value = webhook.bug
+
+    details = execute_action(request=webhook, actions=actions)
+
+    assert list(details.keys()) == ["devtest"]
+
+
+def test_scope_gate_uses_refreshed_bug_data(
+    webhook_request_factory, action_factory, mocked_jira, mocked_bugzilla, bug_factory
+):
+    """Scope is evaluated on the refreshed bug: a bug whose component was moved
+    into scope after the webhook fired must sync."""
+    action = action_factory(
+        whiteboard_tag="devtest",
+        parameters__jira_project_key="JBI",
+        parameters__sync_products_components=["Core::Machine Learning: On-Device"],
+    )
+    actions = Actions(root=[action])
+    webhook = webhook_request_factory(bug__product="Core", bug__component="Networking")
+    mocked_bugzilla.get_bug.return_value = bug_factory(
+        id=webhook.bug.id,
+        product="Core",
+        component="Machine Learning: On-Device",
+        see_also=[],
+    )
+
+    execute_action(request=webhook, actions=actions)
+
+    assert mocked_jira.create_issue.called

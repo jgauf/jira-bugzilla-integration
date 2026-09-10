@@ -54,6 +54,30 @@ def _tag_added_to_whiteboard(
     return False
 
 
+def _bug_in_action_scope(bug: bugzilla_models.Bug, action: Action) -> bool:
+    """Return True when the bug's Product/Component is in the action's sync scope.
+
+    `sync_products_components` (R-01) is an allowlist of either full
+    ``Product::Component`` pairs or bare ``Product`` names (which match every
+    component of that product). Comparison is case-insensitive because BMO
+    product and component names are display strings, not identifiers.
+
+    An unset (``None``) scope means "no restriction", which is today's
+    behavior: every bug matching the whiteboard tag is synced.
+    """
+    scope = action.parameters.sync_products_components
+    if scope is None:
+        return True
+
+    product = (bug.product or "").strip().lower()
+    product_component = bug.product_component.strip().lower()
+    for entry in scope:
+        normalized = entry.strip().lower()
+        if normalized == product_component or normalized == product:
+            return True
+    return False
+
+
 GROUP_TO_OPERATION = {
     "new": Operation.CREATE,
     "existing": Operation.UPDATE,
@@ -265,9 +289,21 @@ def execute_action(
             # is processed (eg. if it spent some time in the DL queue)
             raise IgnoreInvalidRequestError(str(err)) from err
 
-        runner_context = runner_context.update(bug=bug, actions=relevant_actions)
+        # R-01: drop actions whose configured Product/Component scope does not
+        # cover this bug. This is evaluated after `refresh_bug_data` so we scope
+        # on the bug's current product/component rather than a stale payload.
+        in_scope_actions = [
+            action for action in relevant_actions if _bug_in_action_scope(bug, action)
+        ]
+        if not in_scope_actions:
+            raise IgnoreInvalidRequestError(
+                f"bug {bug.product_component!r} is out of scope for matching "
+                f"actions: {', '.join(a.whiteboard_tag for a in relevant_actions)}"
+            )
 
-        return do_execute_actions(runner_context, bug, relevant_actions)
+        runner_context = runner_context.update(bug=bug, actions=in_scope_actions)
+
+        return do_execute_actions(runner_context, bug, in_scope_actions)
     except IgnoreInvalidRequestError as exception:
         logger.info(
             "Ignore incoming request: %s",
