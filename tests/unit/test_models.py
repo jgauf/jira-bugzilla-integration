@@ -4,6 +4,37 @@ import pytest
 from jbi.models import ActionParams, Actions, ActionSteps
 
 
+def test_bidirectional_sync_scaffolding_fields_default_to_noop():
+    """The Phase 1 scaffolding fields added for the BMO<->Jira bidirectional
+    sync plan (docs/bmo-jira-bidirectional-integration-plan.md, D1) must all
+    default to values that reproduce today's (one-directional) behavior,
+    since no existing action configures them."""
+    params = ActionParams(jira_project_key="JBI")
+    assert params.sync_products_components is None
+    assert params.min_priority is None
+    assert params.min_severity is None
+    assert params.identity_map_enabled is False
+    assert params.jira_inbound_enabled is False
+
+
+def test_bidirectional_sync_scaffolding_fields_are_configurable():
+    """Once consumed (D2/D3/D6/D8), these fields should accept the values
+    an action's configuration would set them to."""
+    params = ActionParams(
+        jira_project_key="JBI",
+        sync_products_components=["Core::Machine Learning: On-Device"],
+        min_priority="P2",
+        min_severity="S2",
+        identity_map_enabled=True,
+        jira_inbound_enabled=True,
+    )
+    assert params.sync_products_components == ["Core::Machine Learning: On-Device"]
+    assert params.min_priority == "P2"
+    assert params.min_severity == "S2"
+    assert params.identity_map_enabled is True
+    assert params.jira_inbound_enabled is True
+
+
 @pytest.mark.parametrize("value", [123456, [123456], [12345, 67890], "tbd"])
 def test_valid_bugzilla_user_ids(action_factory, value):
     action = action_factory(bugzilla_user_id=value)

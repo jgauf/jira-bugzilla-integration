@@ -133,6 +133,33 @@ class ActionParams(BaseModel, frozen=True):
     issue_type_map: dict[str, str] = {"task": "Task", "defect": "Bug"}
     linked_project_excludes: list[str] = ["BZFFX"]
 
+    # --- Bidirectional sync scaffolding (docs/bmo-jira-bidirectional-integration-plan.md) ---
+    # These are intentionally no-ops until the deliverables that consume them
+    # land (see the plan's Phase 1 D1-D12). Every field defaults so that
+    # existing `config.*.yaml` files keep parsing unchanged and existing
+    # actions keep their current behavior.
+
+    # R-01: restrict sync to a Product/Component allowlist. `None` means
+    # "no restriction", i.e. today's behavior (every bug matching the
+    # whiteboard tag is synced, regardless of Product/Component).
+    sync_products_components: Optional[list[str]] = None
+
+    # R-04: ignore bugs below a priority/severity threshold. `None` means
+    # "no threshold", i.e. today's behavior (every bug is synced regardless
+    # of priority/severity).
+    min_priority: Optional[str] = None
+    min_severity: Optional[str] = None
+
+    # R-11: enable identity-map-based resolution (YAML override + email
+    # fallback) for assignee sync and comment attribution. Defaults to off,
+    # which preserves today's email-only lookup in `find_jira_user`.
+    identity_map_enabled: bool = False
+
+    # Enables the Jira -> BMO inbound path (the `/jira_webhook` spine and its
+    # reverse field writers) for this action. Defaults to off: no inbound
+    # Jira event has any effect until an action opts in.
+    jira_inbound_enabled: bool = False
+
 
 class Action(BaseModel, frozen=True):
     """
