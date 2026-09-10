@@ -67,6 +67,10 @@ env_files = [
 markers = [
     "no_mocked_bugzilla",
     "no_mocked_jira",
+    # End-to-end scenarios (tests/e2e). Excluded from `testpaths` above and
+    # self-skipping without sandbox credentials, so they never run by
+    # accident; see tests/e2e/README.md.
+    "e2e",
 ]
 
 [tool.mypy]

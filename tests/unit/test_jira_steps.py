@@ -10,8 +10,8 @@ from unittest import mock
 import pytest
 
 from jbi import jira_steps
-from jbi.jira_inbound.models import JiraNamedValue
 from jbi.identity import UNASSIGNED_EMAIL, IdentityEntry, IdentityMap
+from jbi.jira_inbound.models import JiraNamedValue
 from jbi.jira_steps import ReverseContext, ReverseStepStatus
 
 
