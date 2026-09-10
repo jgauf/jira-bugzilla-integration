@@ -508,3 +508,159 @@ def test_summary_writeback_skipped_when_unchanged_in_jira(
 
     assert status == ReverseStepStatus.NOOP
     assert not mocked_bugzilla.update_bug.called
+
+
+# --- Comment write-back + visibility (R-12, plan D10) ----------------------
+
+
+def test_comment_is_copied_with_attribution(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+):
+    """Attribution is required by the PRD and makes a copied comment
+    recognisable rather than looking like the service account's own words."""
+    context = make_context(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        with_comment=True,
+        comment__body="Looks good to me.",
+        comment__author__displayName="Jane Reviewer",
+    )
+    mocked_bugzilla.get_comments.return_value = []
+
+    status, _ = jira_steps.writeback_comment(context, bugzilla_service=mocked_service)
+
+    assert status == ReverseStepStatus.SUCCESS
+    written = mocked_bugzilla.update_bug.call_args.kwargs["comment"]["body"]
+    assert written == "from Jira, by Jane Reviewer:\nLooks good to me."
+
+
+def test_comment_attribution_prefers_the_identity_map(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+    jira_user_factory,
+):
+    """The map is the only source that can name someone whose Jira profile
+    hides their identity details."""
+    identity_map = IdentityMap(
+        users=[
+            IdentityEntry(
+                bmo_email="hidden@mozilla.com",
+                jira_account_id="account-id-hidden",
+                display_name="Real Name",
+            )
+        ]
+    )
+    context = make_context(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        with_comment=True,
+        comment__body="hi",
+        comment__author=jira_user_factory(
+            accountId="account-id-hidden", displayName="hidden user"
+        ),
+    )
+    mocked_bugzilla.get_comments.return_value = []
+
+    with mock.patch("jbi.jira_steps.get_identity_map", return_value=identity_map):
+        jira_steps.writeback_comment(context, bugzilla_service=mocked_service)
+
+    written = mocked_bugzilla.update_bug.call_args.kwargs["comment"]["body"]
+    assert written.startswith("from Jira, by Real Name:")
+
+
+def test_comment_is_not_written_to_a_restricted_bug(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+):
+    """Internal planning context must never land on a bug whose audience JBI
+    cannot reason about."""
+    context = make_context(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        bug_kwargs={"groups": ["core-security"]},
+        with_comment=True,
+        comment__body="internal discussion",
+    )
+
+    status, _ = jira_steps.writeback_comment(context, bugzilla_service=mocked_service)
+
+    assert status == ReverseStepStatus.INCOMPLETE
+    assert not mocked_bugzilla.update_bug.called
+
+
+def test_long_comment_is_truncated_rather_than_dropped(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+):
+    context = make_context(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        with_comment=True,
+        comment__body="x" * 100_000,
+    )
+    mocked_bugzilla.get_comments.return_value = []
+
+    jira_steps.writeback_comment(context, bugzilla_service=mocked_service)
+
+    written = mocked_bugzilla.update_bug.call_args.kwargs["comment"]["body"]
+    assert len(written) <= jira_steps.BMO_COMMENT_MAX_LENGTH
+    assert written.endswith(jira_steps.TRUNCATION_MARKER)
+
+
+def test_event_without_a_comment_writes_nothing(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+):
+    context = make_context(action_factory, bug_factory, jira_webhook_request_factory)
+
+    status, _ = jira_steps.writeback_comment(context, bugzilla_service=mocked_service)
+
+    assert status == ReverseStepStatus.NOOP
+    assert not mocked_bugzilla.update_bug.called
+
+
+def test_duplicate_comment_is_not_posted_twice(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+    comment_factory,
+):
+    """A redelivered event must not append the same text again."""
+    context = make_context(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        with_comment=True,
+        comment__body="Looks good to me.",
+        comment__author__displayName="Jane Reviewer",
+    )
+    mocked_bugzilla.get_comments.return_value = [
+        comment_factory(text="from Jira, by Jane Reviewer:\nLooks good to me.")
+    ]
+
+    status, _ = jira_steps.writeback_comment(context, bugzilla_service=mocked_service)
+
+    assert status == ReverseStepStatus.NOOP
+    assert not mocked_bugzilla.update_bug.called

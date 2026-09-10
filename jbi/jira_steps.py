@@ -21,6 +21,7 @@ from jbi.bugzilla.models import Bug
 from jbi.identity import UNASSIGNED_EMAIL, get_identity_map
 from jbi.jira_inbound.models import JiraWebhookRequest
 from jbi.models import Action, Context
+from jbi.visibility import can_write_comment
 
 if TYPE_CHECKING:
     from jbi.bugzilla.service import BugzillaService
@@ -280,12 +281,76 @@ def writeback_summary(
     return (ReverseStepStatus.SUCCESS, context.append_responses(response))
 
 
+# BMO rejects oversized comments; leave room for the attribution prefix and
+# the truncation marker rather than losing the whole comment.
+BMO_COMMENT_MAX_LENGTH = 65535
+TRUNCATION_MARKER = "\n[... truncated, see the Jira issue for the full comment]"
+
+
+def _comment_author_name(context: ReverseContext) -> str:
+    """Return the display name to attribute a copied comment to.
+
+    Identity map first (it is the only source that can name someone whose
+    Jira email is hidden), then the payload's display name. JBI posts as its
+    own service account rather than impersonating anyone, so this name only
+    ever appears inside the comment text.
+    """
+    author = context.event.comment.author if context.event.comment else None
+    if author and author.accountId:
+        mapped = get_identity_map().display_name_for(author.accountId)
+        if mapped:
+            return mapped
+    if author and author.displayName:
+        return author.displayName
+    return "unknown"
+
+
+def format_comment(context: ReverseContext) -> Optional[str]:
+    """Render the BMO comment text for an inbound Jira comment."""
+    comment = context.event.comment
+    body = comment.body if comment else None
+    if not body:
+        return None
+
+    prefix = f"from Jira, by {_comment_author_name(context)}:\n"
+    budget = BMO_COMMENT_MAX_LENGTH - len(prefix) - len(TRUNCATION_MARKER)
+    if len(body) > budget:
+        body = body[:budget] + TRUNCATION_MARKER
+    return prefix + body
+
+
+def writeback_comment(
+    context: ReverseContext, *, bugzilla_service: BugzillaService
+) -> ReverseStepResult:
+    """Copy a Jira comment onto the linked bug, if the bug's audience allows.
+
+    The "from Jira, by <name>" prefix does double duty: it satisfies the
+    PRD's attribution requirement, and it makes a copied comment recognisable
+    rather than looking like something the service account said itself.
+    """
+    if not context.event.comment:
+        return (ReverseStepStatus.NOOP, context)
+
+    if not can_write_comment(context.bug):
+        return (ReverseStepStatus.INCOMPLETE, context)
+
+    text = format_comment(context)
+    if not text:
+        return (ReverseStepStatus.NOOP, context)
+
+    response = bugzilla_service.add_comment(context.bug, text)
+    if response is None:
+        return (ReverseStepStatus.NOOP, context)
+    return (ReverseStepStatus.SUCCESS, context.append_responses(response))
+
+
 # The reverse pipeline, in execution order.
 REVERSE_STEPS: list[ReverseStep] = [
     writeback_status,
     writeback_priority,
     writeback_assignee,
     writeback_summary,
+    writeback_comment,
 ]
 
 

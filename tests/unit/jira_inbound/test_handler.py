@@ -63,6 +63,7 @@ def test_correlated_and_opted_in_event_is_handled(
         "writeback_priority",
         "writeback_assignee",
         "writeback_summary",
+        "writeback_comment",
     }
 
 
