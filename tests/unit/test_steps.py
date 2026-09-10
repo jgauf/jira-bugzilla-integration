@@ -3695,6 +3695,102 @@ def test_non_phabricator_attachment_does_not_move_issue_to_review(
     assert not mocked_jira.set_issue_status.called
 
 
+@pytest.mark.parametrize(
+    "flag_value,expected_status,expects_transition",
+    [
+        ("-", steps.StepStatus.SUCCESS, True),
+        ("+", steps.StepStatus.NOOP, False),
+        ("?", steps.StepStatus.NOOP, False),
+    ],
+)
+def test_review_flag_moves_issue_out_of_review(
+    action_context_factory,
+    attachment_flag_factory,
+    mocked_jira,
+    action_params_factory,
+    flag_value,
+    expected_status,
+    expects_transition,
+):
+    context = action_context_factory(
+        operation=Operation.ATTACHMENT,
+        bug__with_attachment=True,
+        bug__attachment__content_type="text/x-phabricator-request",
+        bug__attachment__file_name="phabricator-D1234-url.txt",
+        bug__attachment__flags=[
+            attachment_flag_factory(name="review", value=flag_value)
+        ],
+        event__target="attachment",
+        jira__issue="JBI-234",
+        current_step="sync_phabricator_review_state",
+    )
+    mocked_jira.get_issue.return_value = _issue_with_category("indeterminate")
+
+    result, _ = steps.sync_phabricator_review_state(
+        context,
+        parameters=action_params_factory(
+            phabricator_changes_requested_status="In Progress"
+        ),
+        jira_service=JiraService(mocked_jira),
+    )
+
+    assert result == expected_status
+    assert mocked_jira.set_issue_status.called is expects_transition
+    if expects_transition:
+        mocked_jira.set_issue_status.assert_called_once_with("JBI-234", "In Progress")
+
+
+def test_review_minus_does_nothing_without_configured_status(
+    action_context_factory, attachment_flag_factory, mocked_jira, action_params_factory
+):
+    context = action_context_factory(
+        operation=Operation.ATTACHMENT,
+        bug__with_attachment=True,
+        bug__attachment__content_type="text/x-phabricator-request",
+        bug__attachment__file_name="phabricator-D1234-url.txt",
+        bug__attachment__flags=[attachment_flag_factory(name="review", value="-")],
+        event__target="attachment",
+        jira__issue="JBI-234",
+        current_step="sync_phabricator_review_state",
+    )
+
+    result, _ = steps.sync_phabricator_review_state(
+        context,
+        parameters=action_params_factory(),
+        jira_service=JiraService(mocked_jira),
+    )
+
+    assert result == steps.StepStatus.NOOP
+    assert not mocked_jira.set_issue_status.called
+
+
+def test_review_minus_does_not_transition_closed_issue(
+    action_context_factory, attachment_flag_factory, mocked_jira, action_params_factory
+):
+    context = action_context_factory(
+        operation=Operation.ATTACHMENT,
+        bug__with_attachment=True,
+        bug__attachment__content_type="text/x-phabricator-request",
+        bug__attachment__file_name="phabricator-D1234-url.txt",
+        bug__attachment__flags=[attachment_flag_factory(name="review", value="-")],
+        event__target="attachment",
+        jira__issue="JBI-234",
+        current_step="sync_phabricator_review_state",
+    )
+    mocked_jira.get_issue.return_value = _issue_with_category("done")
+
+    result, _ = steps.sync_phabricator_review_state(
+        context,
+        parameters=action_params_factory(
+            phabricator_changes_requested_status="In Progress"
+        ),
+        jira_service=JiraService(mocked_jira),
+    )
+
+    assert result == steps.StepStatus.NOOP
+    assert not mocked_jira.set_issue_status.called
+
+
 def test_status_category_helper_returns_none_for_unreadable_issue(
     action_context_factory, mocked_jira
 ):

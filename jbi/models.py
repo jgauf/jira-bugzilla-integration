@@ -159,6 +159,7 @@ class ActionParams(BaseModel, frozen=True):
     # (the default) means the corresponding step does nothing, so adding the
     # steps to an action's config without setting these is inert.
     phabricator_review_status: Optional[str] = None
+    phabricator_changes_requested_status: Optional[str] = None
 
     # Enables the Jira -> BMO inbound path (the `/jira_webhook` spine and its
     # reverse field writers) for this action. Defaults to off: no inbound

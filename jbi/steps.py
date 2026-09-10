@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 from requests import exceptions as requests_exceptions
 
 from jbi import Operation
-from jbi.bugzilla.models import JIRA_HOSTNAMES
+from jbi.bugzilla.models import JIRA_HOSTNAMES, WebhookAttachment
 from jbi.environment import get_settings
 
 
@@ -209,6 +209,60 @@ def maybe_update_issue_status_on_patch(
     if jira_service.issue_is_in_terminal_state(context, issue_key):
         # Never drag a closed issue back into review: the bug may have been
         # resolved while a stale patch was still being attached.
+        logger.info(
+            "Issue %s is in a terminal state, not moving it to %r",
+            issue_key,
+            target_status,
+            extra=context.update(operation=Operation.IGNORE).model_dump(),
+        )
+        return (StepStatus.NOOP, context)
+
+    resp = jira_service.update_issue_status(context, target_status)
+    context = context.append_responses(resp)
+    return (StepStatus.SUCCESS, context)
+
+
+def _review_flag_value(attachment: WebhookAttachment) -> Optional[str]:
+    """Return the value of the attachment's `review` flag, if any."""
+    for flag in attachment.flags or []:
+        if flag.name == "review":
+            return flag.value
+    return None
+
+
+def sync_phabricator_review_state(
+    context: ActionContext,
+    *,
+    parameters: ActionParams,
+    jira_service: JiraService,
+) -> StepResult:
+    """Move the issue out of review when a reviewer requests changes (R-03).
+
+    A `review-` flag means the patch is back with its author, so leaving the
+    issue in review would wrongly imply reviewers are the bottleneck. `review+`
+    and `review?` are left alone: the former is handled by the bug's own status
+    change, and the latter is the request that R-02 already reacted to.
+
+    Inert unless the action configures `phabricator_changes_requested_status`.
+    """
+    target_status = parameters.phabricator_changes_requested_status
+    if not target_status:
+        return (StepStatus.NOOP, context)
+
+    if context.event.target != "attachment" or not context.bug.attachment:
+        return (StepStatus.NOOP, context)
+
+    attachment = context.bug.attachment
+    if not attachment.is_phabricator_patch():
+        return (StepStatus.NOOP, context)
+
+    if _review_flag_value(attachment) != "-":
+        return (StepStatus.NOOP, context)
+
+    issue_key = context.jira.issue
+    assert issue_key  # Attachment events only run on linked bugs.
+
+    if jira_service.issue_is_in_terminal_state(context, issue_key):
         logger.info(
             "Issue %s is in a terminal state, not moving it to %r",
             issue_key,
