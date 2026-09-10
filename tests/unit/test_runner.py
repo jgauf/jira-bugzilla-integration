@@ -1105,3 +1105,72 @@ def test_below_threshold_bug_is_logged_as_ignored(
         "below the sync threshold" in record.message for record in capturelogs.records
     )
     assert not mocked_jira.create_issue.called
+
+
+# --- Invariant C, BMO side: forward-path echo gate (plan D6b) ---------------
+
+
+def test_event_authored_by_jbi_is_ignored(
+    webhook_request_factory, actions, mocked_jira, mocked_bugzilla, settings
+):
+    """A reverse write into BMO fires this webhook like any human edit. Without
+    this gate it would bounce straight back into Jira."""
+    webhook = webhook_request_factory(event__user__login="jbi-bot@mozilla.bugs")
+    mocked_bugzilla.get_bug.return_value = webhook.bug
+
+    with mock.patch.object(settings, "bugzilla_bot_login", "jbi-bot@mozilla.bugs"):
+        with mock.patch("jbi.runner.settings", settings):
+            with pytest.raises(IgnoreInvalidRequestError) as exc_info:
+                execute_action(request=webhook, actions=actions)
+
+    assert "authored by JBI itself" in str(exc_info.value)
+    assert not mocked_jira.create_issue.called
+    assert not mocked_jira.update_issue_field.called
+
+
+def test_event_authored_by_a_human_is_not_suppressed(
+    webhook_request_factory, actions, mocked_jira, mocked_bugzilla, settings
+):
+    webhook = webhook_request_factory(
+        event__user__login="person@mozilla.com", bug__see_also=[]
+    )
+    mocked_bugzilla.get_bug.return_value = webhook.bug
+
+    with mock.patch.object(settings, "bugzilla_bot_login", "jbi-bot@mozilla.bugs"):
+        with mock.patch("jbi.runner.settings", settings):
+            execute_action(request=webhook, actions=actions)
+
+    assert mocked_jira.create_issue.called
+
+
+def test_actorless_event_is_not_suppressed(
+    webhook_request_factory, actions, mocked_jira, mocked_bugzilla, settings
+):
+    """`WebhookEvent.user` is optional, and an admin- or migration-driven
+    change can arrive without one. Those fail open; D7's read-before-write is
+    the backstop for the echo case."""
+    webhook = webhook_request_factory(event__user=None, bug__see_also=[])
+    mocked_bugzilla.get_bug.return_value = webhook.bug
+
+    with mock.patch.object(settings, "bugzilla_bot_login", "jbi-bot@mozilla.bugs"):
+        with mock.patch("jbi.runner.settings", settings):
+            execute_action(request=webhook, actions=actions)
+
+    assert mocked_jira.create_issue.called
+
+
+def test_no_suppression_when_bot_login_is_unconfigured(
+    webhook_request_factory, actions, mocked_jira, mocked_bugzilla, settings
+):
+    """Unset `bugzilla_bot_login` (today's deployed state) must suppress
+    nothing at all."""
+    webhook = webhook_request_factory(
+        event__user__login="anyone@mozilla.com", bug__see_also=[]
+    )
+    mocked_bugzilla.get_bug.return_value = webhook.bug
+
+    assert settings.bugzilla_bot_login is None
+
+    execute_action(request=webhook, actions=actions)
+
+    assert mocked_jira.create_issue.called

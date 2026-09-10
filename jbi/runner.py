@@ -303,6 +303,24 @@ def execute_action(
         if bug.is_private:
             raise IgnoreInvalidRequestError("private bugs are not supported")
 
+        # Invariant C, BMO side: a reverse write into Bugzilla fires this same
+        # webhook, so without this gate every Jira -> BMO write would bounce
+        # straight back into Jira. Handled here rather than in the router so
+        # a suppressed event is logged and counted like any other ignored one.
+        #
+        # `event.user` is optional in BMO payloads, so an actor-less event
+        # cannot be matched and is allowed through (fail-open). D7's
+        # read-before-write is what stops that case from oscillating: a write
+        # of an unchanged value issues no request.
+        if (
+            settings.bugzilla_bot_login
+            and event.user
+            and event.user.login == settings.bugzilla_bot_login
+        ):
+            raise IgnoreInvalidRequestError(
+                f"ignore event authored by JBI itself ({event.user.login})"
+            )
+
         try:
             relevant_actions = lookup_actions(bug, actions)
         except ActionNotFoundError as err:
