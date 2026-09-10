@@ -7,6 +7,23 @@
 > **Audience:** Reviewers and implementers. This document does not itself change
 > behavior; it is the design and traceability reference the implementation PRs
 > will point back to.
+> **Revision:** v3 — incorporates review feedback on PR #1386 (scalability of
+> the inbound Automation rule, reversibility of `status_map`, and one-sided
+> loop prevention). See "Review feedback — what changed in v3" below.
+
+---
+
+## 0. Review feedback — what changed in v3
+
+Three issues were raised in review of v2. Each is resolved in the body of the
+plan; this table is the index so a returning reviewer can go straight to the
+change.
+
+| # | Review finding | Resolution | Where |
+|---|---|---|---|
+| 1 | Per-project Jira Automation rules don't scale — prod config already spans 35 Jira projects across 43 actions, and each opt-in would need a hand-built rule in that project with no central visibility. | Adopted: **one centrally-owned multi-project Automation rule** scoped by JQL. Onboarding a project becomes a one-line JQL edit. Per-project rules are kept only as the documented fallback if the site is not on a plan that supports multi-project rules. | §1, §12 |
+| 2 | The Bugzilla→Jira `status_map` is many-to-one and therefore not invertible; a literal reverse map would be N hand-maintained maps. | Adopted: **never invert `status_map`.** Reverse *status* derives from Jira's project-agnostic `statusCategory`; reverse *resolution* derives from the inverted per-action `resolution_map` — which, unlike `status_map`, is injective in all 17 prod configs that define one. Residual ambiguity is handled explicitly rather than guessed. | §1, §4.1 |
+| 3 | Loop prevention only covered the Jira→BMO direction; a reverse write into BMO fires the normal Bugzilla webhook and re-enters the forward pipeline. | Adopted: echo suppression is now **symmetric** and stated as Invariant C. The forward path gains the same "was this us?" actor check using `WebhookEvent.user.login`, and D7's read-before-write idempotency is the second line of defence. | Invariant C, §7, §9-D6b |
 
 ---
 
@@ -18,7 +35,9 @@ rather than infer it.
 
 | Area | Decision |
 |---|---|
-| Inbound Jira path | **Push** via a Jira Automation "Send web request" rule → a new `POST /jira_webhook` endpoint. Polling is a documented fallback only. |
+| Inbound Jira path | **Push** via **one centrally-owned, multi-project** Jira Automation "Send web request" rule, scoped by JQL, → a new `POST /jira_webhook` endpoint. Per-project rules are explicitly rejected as unscalable (§12). Polling is a documented fallback only. |
+| Reverse status/resolution | **Never invert `status_map`** — it is many-to-one. Reverse *status* is derived from Jira's `statusCategory`; reverse *resolution* from the inverted per-action `resolution_map`. (§4.1) |
+| Loop prevention | **Symmetric by design.** Both inbound paths drop events authored by JBI's own account — Jira `accountId` inbound, `WebhookEvent.user.login` on the Bugzilla side — backed by read-before-write idempotency. (Invariant C) |
 | State store | **No new datastore in Phase 1.** Correlation reuses the existing `see_also`/remote-link; identity lives in YAML; loop-prevention is stateless. Redis is considered only if multi-instance ephemeral state later proves necessary. |
 | Conflict policy | **BMO wins for execution fields; Jira wins for planning-only fields.** (Defined in §4.) |
 | Pilot | **Core :: Machine Learning: On-Device.** |
@@ -34,6 +53,15 @@ rather than infer it.
   real-time (comfortably inside the PRD's 5-minute SLA) and its cost scales with
   the number of *actual* changes, not with a polling interval. Jira Automation is
   already part of JBI onboarding today, so the mechanism is not new operationally.
+  The rule is **central and multi-project, not per-project**: prod config already
+  covers 35 Jira projects, so a per-project rule would mean 35 hand-built,
+  independently-drifting copies owned by 35 different project admins. One rule
+  scoped by JQL keeps onboarding, auditing, and revocation in one place (§12).
+- **Symmetric loop prevention** because a write is a write in both systems: a
+  reverse write into BMO fires BMO's normal webhook and re-enters the forward
+  pipeline exactly like a human edit would. Suppressing echoes on only the Jira
+  side leaves that half of the loop open, so the actor check is applied on both
+  inbound paths (Invariant C).
 - **No new datastore** because every piece of state we need already has a home:
   the bug↔issue correlation is the `see_also` link (BMO) plus the remote link
   (Jira); the identity overrides are near-static and belong in version-controlled
@@ -105,6 +133,31 @@ that never had a bug — therefore has no reverse effect at all. This is the mir
 image of Invariant A: A prevents duplicate Jira issues, B prevents spurious BMO
 bugs.
 
+**Invariant C — a sync must never echo back into the system it came from.**
+Every write JBI makes is, to the receiving system, an ordinary change: it fires
+that system's normal webhook and re-enters the *other* direction's pipeline.
+Loop-safety therefore has to be symmetric, and v2 only had half of it.
+
+- *Jira → BMO (already in v2):* an inbound Jira event authored by the JBI service
+  account is dropped, so JBI's own Jira writes don't come back at it.
+- *BMO → Jira (added in v3):* the same check now runs on the forward path. When
+  a reverse write lands in Bugzilla, BMO fires `/bugzilla_webhook` as usual; the
+  forward pipeline compares the event's actor — `WebhookEvent.user.login`, which
+  the payload already carries (`jbi/bugzilla/models.py`) — against JBI's
+  configured Bugzilla account and drops the event before any Jira write.
+- *Backstop:* the actor check is an optimization as much as a guard, and it is
+  not sufficient on its own — `WebhookEvent.user` is `Optional`, and an
+  admin-run or migration-driven change can arrive with no actor. The second line
+  of defence is D7's read-before-write: a write whose value already matches is a
+  no-op, so even an unsuppressed echo terminates after one round trip instead of
+  oscillating.
+
+Why both layers are needed: without the actor check, every reverse write costs a
+wasted BMO→Jira round trip. Without read-before-write, a value that does *not*
+survive the round trip identically — which is exactly the risk the non-invertible
+`status_map` creates (§4.1) — would be rewritten with a *different* value each
+pass, corrupting the field rather than merely wasting a call.
+
 **Consequence — the two directions are deliberately asymmetric.**
 BMO→Jira may CREATE-or-UPDATE; Jira→BMO is UPDATE-only. Beyond enforcing
 Invariant B, the same correlation gate that finds "the bug behind this issue"
@@ -149,6 +202,77 @@ means a reviewer can audit the policy by reading one module.
 > components have it enabled. The denylist is therefore evaluated per-component in
 > Phase 2; for the Phase-1 pilot we treat Sprint / Story Points / Epic as
 > Jira-only and suppress their write-back.
+
+### 4.1 Reverse status & resolution mapping (why `status_map` is not inverted)
+
+**The problem.** v2 said the Jira→BMO close path would "reuse the existing
+status/resolution maps." Review correctly rejected that: **`status_map` is
+many-to-one and cannot be inverted.** In prod config today, 30 of 43 actions
+define a `status_map`, and the collapsing is severe — e.g. the `fxcm` action maps
+`RESOLVED, VERIFIED, FIXED, INVALID, WONTFIX, INACTIVE, DUPLICATE, WORKSFORME,
+INCOMPLETE, MOVED` all to the single Jira status `Done`. Given `Done`, there is
+no way to recover which BMO status/resolution produced it. Worse, the collapsing
+differs per project's workflow (`fidefe` uses `Closed`, `fxdroid` uses `Done` and
+`In Eng`), so a literal reverse map would be **N hand-maintained maps** — the
+same per-project sprawl rejected for Automation rules in §12. It is also the
+concrete mechanism behind the corruption risk in Invariant C: a status that does
+not round-trip identically gets *rewritten wrong*, not merely rewritten.
+
+**The design.** Split the problem, because the two halves have different shapes.
+
+*Status — derive from `statusCategory`, not from status names.* Every Jira
+status, in every project's custom workflow, belongs to exactly one of three
+built-in categories, and the inbound payload carries it as
+`fields.status.statusCategory.key`. That gives **one project-agnostic default
+map** instead of N:
+
+| Jira `statusCategory.key` (colour) | BMO status written |
+|---|---|
+| `new` (blue-gray) | `NEW` — or `REOPENED` if the bug is currently in a resolved state |
+| `indeterminate` (yellow) | `ASSIGNED` |
+| `done` (green) | resolved — see the resolution rule below |
+
+The `new`-category rule is state-dependent on purpose: BMO distinguishes "never
+worked" from "was closed and is now open again," and writing `NEW` over a
+previously-resolved bug would silently erase that history. The current BMO status
+is already available from D7's read-before-write fetch, so this costs no extra
+call.
+
+*Resolution — invert `resolution_map`, which unlike `status_map` actually is
+invertible.* `resolution_map` maps a BMO resolution to a Jira **resolution**
+field value (`FIXED → Done`, `WONTFIX → Won't Do`, `DUPLICATE → Duplicate`, …).
+We checked every prod config that defines one: **all 17 are injective** — no two
+BMO resolutions collapse onto the same Jira resolution — so inverting them is
+mechanically safe and needs no new hand-written config. The inverse is computed
+at config-load time, and **config validation fails loudly if a future
+`resolution_map` is non-injective**, so this property is enforced rather than
+assumed.
+
+*The ambiguous residue — named, not guessed.* Green/`done` says a bug is finished
+but not *why*, and the Jira resolution field may be unset. Precedence:
+
+1. Jira resolution field set and present in the inverted `resolution_map` → write
+   that BMO resolution.
+2. Unset or unmapped → write the action's new optional
+   `default_reverse_resolution` (proposed default `FIXED`, since a human closing
+   an issue in a delivery project overwhelmingly means fixed).
+3. No default configured → **write the status transition but leave the resolution
+   untouched**, log at WARN, and surface the bug in the R-13 reconciliation report
+   for a human. Never guess a resolution: a wrong `DUPLICATE` or `WONTFIX` is a
+   factual claim about the bug that misleads everyone reading it later.
+
+**Config surface** (all optional, default-OFF, per constraint §6-3): a global
+`REVERSE_STATUS_CATEGORY_MAP` default as tabled above, an optional per-action
+`reverse_status_overrides` for projects whose workflow genuinely needs different
+BMO targets, and `default_reverse_resolution`. The pilot ships on the defaults;
+no other project is touched.
+
+**What this costs.** Reverse status sync is deliberately lower-fidelity than
+forward: Jira's three categories cannot express BMO's full status vocabulary, so
+a Jira move to `In Eng` and to `In Review` both write `ASSIGNED`. That is the
+correct trade — BMO is authoritative for execution state (§4), so the reverse
+direction only needs to keep BMO from being *stale*, not to mirror Jira's
+workflow granularity into it.
 
 ---
 
@@ -237,7 +361,11 @@ concrete and, equally important, make each PR safe and easy to review.
    production impact is contained and a problem is contained with it.
 5. **Reuse over rebuild.** Where the PRD overlaps existing behavior, we extend it:
    R-02/R-03 build on `maybe_add_phabricator_link`; Jira→BMO close reuses the
-   existing status/resolution maps; the reconciliation job reuses the standalone
+   existing `resolution_map` **by inversion** (safe: injective in every prod
+   config, and validated at load) while deriving status from Jira's
+   `statusCategory` rather than inverting the many-to-one `status_map` — see
+   §4.1, which supersedes v2's blanket "reuse the existing status/resolution
+   maps"; the reconciliation job reuses the standalone
    scheduled-runner pattern already established by `jbi/retry.py`. This keeps the
    surface area — and the review burden — small.
 
@@ -268,22 +396,30 @@ Bugzilla --POST /bugzilla_webhook--> execute_or_queue --> Executor --> steps.py 
 
 We add a **second, symmetric inbound path for Jira**, and a set of reverse steps
 that write to BMO through an extended `bugzilla_service`. The forward path is
-unchanged. The reverse path is guarded at three points before any write: it
+unchanged **except for one additive gate**: it now drops events authored by JBI's
+own Bugzilla account, which closes the other half of the loop (Invariant C). The
+reverse path is guarded at three points before any write: it
 correlates the issue back to a bug (Invariant B), suppresses events authored by
 JBI's own service account (loop-prevention), resolves identities and enforces
 visibility, and applies the write-back denylist (§4).
 
 ```
-Bugzilla --POST /bugzilla_webhook--> execute_or_queue --> Executor --> steps.py -----> Jira
-   ^                                       |                                  |
-   |                               DeadLetterQueue                     (unchanged)
+Bugzilla --POST /bugzilla_webhook--> [echo gate] --> execute_or_queue --> Executor --> steps.py --> Jira
+   ^                                     ^                |                                  |
+   |                        (NEW: drop if event.user.login  DeadLetterQueue           (otherwise unchanged)
+   |                         == JBI's BMO account)
    |
-   +-- bugzilla_service writes <- jira_steps.py <- ReverseExecutor <- execute_or_queue <- POST /jira_webhook <- Jira Automation
-       (status/assignee/priority/                       |                     ^
-        summary/comment, guarded)             identity + visibility      (echo-suppressed:
-                                              + writeback denylist        ignore JBI-bot actor;
-                                                                          ignore uncorrelated issue)
+   +-- bugzilla_service writes <- jira_steps.py <- ReverseExecutor <- execute_or_queue <- POST /jira_webhook <- ONE central
+       (status/assignee/priority/          |                     ^                                             multi-project
+        summary/comment, guarded)  identity + visibility   (echo-suppressed:                                   Automation rule
+                                   + writeback denylist     ignore JBI-bot actor;                              (JQL-scoped)
+                                   + statusCategory map     ignore uncorrelated issue)
+                                     (§4.1)
 ```
+
+The two `[echo gate]`s are the same rule applied at both entry points, which is
+what makes Invariant C hold: neither system's copy of a value can re-enter the
+pipeline that produced it.
 
 **New modules** — kept as new files so the diff is legible and the forward path is
 untouched:
@@ -297,6 +433,12 @@ untouched:
 - `bin/seed_identity_map.py` — identity-map seeding/drift detection.
 
 **Extended (in place, additively):**
+- `jbi/router.py` / `jbi/runner.py` — the forward-path echo gate (Invariant C),
+  a single early-return on actor match.
+- `jbi/environment.py` — `Settings` gains `bugzilla_bot_login` and
+  `jira_bot_account_id`: the two identities the echo gates compare against.
+  These live in `Settings`, not per-action config, because there is exactly one
+  JBI service account per deployment.
 - `jbi/bugzilla/service.py` — new write methods layered on the existing generic
   `client.update_bug`.
 - `jbi/bugzilla/models.py` — typed release-flag and Target-Milestone fields.
@@ -319,7 +461,7 @@ codebase, and the specific files/functions a PR will touch. Verdicts:
 | **R-04** priority/severity threshold | ❌ | `ActionParams` `min_priority`/`min_severity`; early-ignore gate in `runner.py`. |
 | **Field sync BMO→Jira** | ✅ done | Existing steps: summary/status/assignee/priority/comment. No change. |
 | **Field sync Jira→BMO** (PRD §6.2 table) | ❌ | `jira_steps.py` writers + `bugzilla/service.py` new methods over `client.update_bug`. |
-| **Idempotency / loop prevention** | ❌ | Service-account echo-suppression + read-before-write idempotency. Stateless (no store). |
+| **Idempotency / loop prevention** | ❌ | **Symmetric** service-account echo-suppression — inbound Jira (`accountId`) *and* forward Bugzilla (`WebhookEvent.user.login`, `runner.py`/`router.py`) — plus read-before-write idempotency as backstop. Stateless (no store). Invariant C, D6/D6b/D7. |
 | **R-05** metabug→epic | ❌ | `jbi/hierarchy.py` + `jira/service.py create_epic/find_epic`; step `ensure_metabug_epic`. |
 | **R-06** bug-under-metabug→epic task | ❌ | `hierarchy.py`: on CREATE, parent under the metabug's epic where applicable. |
 | **R-07** re-parent never writes to BMO | 🟡 enforce | Add epic/parent to `WRITEBACK_DENYLIST`; reverse steps ignore parent-change events. |
@@ -338,8 +480,8 @@ codebase, and the specific files/functions a PR will touch. Verdicts:
 and low-risk, so they can land in any order after the scaffolding. The
 reverse-direction items are strictly ordered so that **no reverse write can ever
 land before the safety machinery that governs it**: the inbound spine and its
-correlation/echo gate (D6) and idempotent writes (D7) merge *before* any field
-writer (D9/D10) is enabled. Each deliverable is additive, config-gated, and
+correlation/echo gate (D6), the forward-path echo gate (D6b), and idempotent
+writes (D7) all merge *before* any field writer (D9/D10) is enabled. Each deliverable is additive, config-gated, and
 default-OFF, ships with its own tests, and keeps the full suite green.
 
 Format per deliverable: *what it accomplishes · requirement · files · tests ·
@@ -406,10 +548,29 @@ uncorrelated issue is a no-op; a bot-authored event is a no-op. · *Acceptance:*
 D1. · *Review note:* no behavioral risk — the endpoint only logs/correlates and
 mirrors the proven `/bugzilla_webhook` shape.
 
+**D6b — Forward-path echo gate (Invariant C, second half).**
+*Accomplishes:* stops a reverse write into BMO from bouncing straight back into
+Jira through the existing forward pipeline — the gap review identified in v2. ·
+*Traces to:* Invariant C; enabling safety for D9/D10 (not an R-number). ·
+*Files:* `jbi/environment.py` (`Settings.bugzilla_bot_login`), and a single early
+IGNORE in the forward path keyed on `WebhookEvent.user.login` — placed in
+`runner.py` alongside the existing ignore/short-circuit logic so it is logged and
+observable the same way as every other skipped event, rather than silently
+dropped at the router. Handles `event.user is None` by **proceeding** (fail-open),
+because a missing actor is an ordinary BMO payload shape, not evidence of an
+echo; D7's read-before-write covers that case instead. · *Tests:*
+`test_runner.py` with `WebhookRequestFactory` — an event authored by the bot
+login produces zero Jira calls and an IGNORE log; the same event authored by a
+human syncs normally; a `user is None` event syncs normally. · *Acceptance:*
+**Invariant C** in the BMO→Jira direction: a JBI-authored BMO change causes no
+Jira write. · *Depends:* D1. · *Review note:* one early-return plus one setting;
+inert until a bot login is configured (unset default = current behavior exactly).
+
 **D7 — BMO write service + idempotent writes.**
 *Accomplishes:* the low-level ability to write execution fields back to BMO,
-built so that an echoed value is a silent no-op — the second half of
-loop-prevention. · *Files:* `bugzilla/service.py` new methods
+built so that an echoed value is a silent no-op — the backstop layer of
+Invariant C, which holds even when the D6/D6b actor checks cannot fire (missing
+actor, admin-run change). · *Files:* `bugzilla/service.py` new methods
 (`set_status_resolution`, `set_assignee`, `set_priority`, `set_summary`,
 `add_comment`) over the existing `client.update_bug`; read-before-write (reusing
 `refresh_bug_data`) so writing a value that already matches issues no update. ·
@@ -434,9 +595,19 @@ unmapped user resolves by email; an unresolved user degrades gracefully. ·
 *Accomplishes:* the actual bidirectional field sync for execution fields. ·
 *Files:* `jira_steps.py` — `writeback_status`/`_resolution`, `_priority`,
 `_assignee` (using D8), `_summary`; behind `jira_inbound_enabled`; enforcing the
-`WRITEBACK_DENYLIST`. · *Tests:* `test_jira_steps.py` — each event maps to the
-right BMO write; a planning-field change writes nothing. · *Acceptance:* **PRD
-Scenario 3** (status flows both directions). · *Depends:* D6, D7, D8.
+`WRITEBACK_DENYLIST`. Status/resolution follow **§4.1**: status from
+`fields.status.statusCategory.key`, resolution from the inverted
+`resolution_map`, plus the `default_reverse_resolution` / leave-untouched
+precedence. `models.py` computes and validates the inverted `resolution_map` at
+config load (**fails loudly on a non-injective map**). · *Tests:*
+`test_jira_steps.py` — each category maps to the right BMO status; `new`
+category on a resolved bug writes `REOPENED`, on an open bug writes `NEW`; an
+unset Jira resolution falls through to the configured default; with no default,
+status is written and resolution is left alone with a WARN; a planning-field
+change writes nothing. `test_configuration.py` — a hand-crafted non-injective
+`resolution_map` is rejected at load. · *Acceptance:* **PRD Scenario 3** (status
+flows both directions) with **no reliance on inverting `status_map`.** ·
+*Depends:* D6, D6b, D7, D8.
 
 **D10 — Reverse comment writer + visibility guard (R-12).**
 *Accomplishes:* comment sync from Jira to BMO that can never leak internal
@@ -445,7 +616,7 @@ context onto a public bug. · *Files:* `jbi/visibility.py` (guard from
 "from Jira, by \<name\>" attribution. · *Tests:* `test_visibility.py` +
 `test_jira_steps.py` — a public bug receives the comment; a confidential/private
 bug blocks write-back; attribution text is present. · *Acceptance:* **PRD
-Scenario 4** and no internal context on a public bug. · *Depends:* D6, D7, D8.
+Scenario 4** and no internal context on a public bug. · *Depends:* D6, D6b, D7, D8.
 
 **D11 — Conflict policy / execution-vs-planning (§4).**
 *Accomplishes:* deterministic resolution when both sides changed, and centralized
@@ -460,11 +631,14 @@ touches BMO. · *Depends:* D9, D10.
 pilot on. · *Files:* new `tests/e2e/` driving Scenarios 1–4 against a Jira sandbox
 and a BMO test component; flip the pilot flag for Core :: Machine Learning:
 On-Device. · *Tests:* Scenarios 1–4 within the 5-minute SLA; **Invariant A**
-regression (re-syncing an already-linked bug creates zero new issues). ·
+regression (re-syncing an already-linked bug creates zero new issues);
+**Invariant C** regression (a Jira status change writes BMO once and the
+resulting BMO webhook produces zero further Jira writes — the full round trip
+terminates). ·
 *Acceptance:* all four PRD §8 scenarios green. · *Depends:* D9–D11.
 
-**Dependency graph:** D1 → {D2, D3, D4→D5, D6, D8}; D7 standalone;
-{D6, D7, D8} → D9 & D10 → D11 → D12.
+**Dependency graph:** D1 → {D2, D3, D4→D5, D6, D6b, D8}; D7 standalone;
+{D6, D6b, D7, D8} → D9 & D10 → D11 → D12.
 
 ---
 
@@ -566,8 +740,19 @@ per deliverable rather than deferred to the end.
   `tests/unit/test_jira_steps.py`, `tests/unit/test_identity.py`,
   `tests/unit/test_visibility.py`, and a new `tests/e2e/`.
 - **The invariant tests are permanent regression guards:** Invariant A (no
-  duplicate Jira issue on re-sync) and Invariant B (no BMO bug from an inbound
-  event) live in the suite so no future change can silently break them.
+  duplicate Jira issue on re-sync), Invariant B (no BMO bug from an inbound
+  event), and **Invariant C (no echo in either direction)** live in the suite so
+  no future change can silently break them. Invariant C is tested at three
+  levels: unit (bot-authored event → IGNORE, D6b), unit (write of an unchanged
+  value → no API call, D7), and e2e (a full Jira→BMO→Jira round trip terminates
+  with exactly one BMO write and zero return Jira writes, D12).
+- **Round-trip fidelity is tested explicitly, not assumed:** for every Jira
+  `statusCategory` the reverse map produces a BMO status which, pushed back
+  through the *forward* `status_map`, must land on a Jira status in the same
+  category. A property-style test over each configured action's `status_map`
+  catches a project whose workflow would oscillate before it is onboarded, and is
+  the mechanical check behind §4.1's claim that lower-fidelity reverse mapping is
+  safe.
 - **Reviewability is a design goal of the test plan:** because each PR is
   additive and flag-off, it can be merged without changing production behavior,
   and the reverse writers stay disabled until both D6's correlation/echo gate and
@@ -599,13 +784,42 @@ its bug via the existing link.
   custom fields, components) exist on the create/update screens.
 
 **Jira — new for bidirectional (this project):**
-- A **Jira Automation rule** on the pilot project: *When an issue's status,
-  assignee, priority, or summary changes, or a comment is added → **Send web
-  request*** to `POST https://<jbi-host>/jira_webhook` with the JBI API key. This
-  rule *is* the inbound push mechanism.
+
+- **One centrally-owned, multi-project Automation rule** — *not* one rule per
+  project. *When an issue's status, assignee, priority, or summary changes, or a
+  comment is added → **Send web request*** to
+  `POST https://<jbi-host>/jira_webhook` with the JBI API key.
+  - **Scope:** created at the site/global level with rule scope set to *multiple
+    projects*, and narrowed by a **JQL condition** listing the opted-in projects,
+    e.g. `project in (AIPLAT)` for the pilot. Onboarding a project is then a
+    **one-line JQL edit** by the rule's owner, reviewed like any other config
+    change — not a request to that project's Jira admin to hand-build a rule.
+  - **Why not per-project:** prod config already spans **35 Jira projects across
+    43 actions** (`config/config.prod.yaml`). Per-project rules would mean 35
+    independently-owned copies with no central answer to "which projects are
+    wired up, and is each still configured correctly?" — the same drift problem
+    that config-in-repo exists to avoid. One rule makes the opted-in set a single
+    readable JQL clause, and revocation a single edit.
+  - **Ownership:** the rule is owned by the JBI service account in a
+    JBI-administered space, so it cannot be silently edited or deleted by an
+    individual project's admins.
+  - **Keep it aligned with repo config:** the JQL project list must match the
+    projects opted into inbound sync in `config/config.{env}.yaml`. Phase 3 adds
+    a drift check to the R-13 reconciliation report (rule scope vs. config); until
+    then, the pairing is a documented step in the onboarding checklist.
+  - **Prerequisite / fallback:** multi-project rule scope requires Jira Cloud
+    **Premium** (single-project rules are available on all plans). **To verify
+    before D6** (§13-7). If the site is not on Premium, the fallback is a
+    per-project rule for the **pilot only**, with the multi-project rule treated
+    as a blocker to onboarding project #2 — we do not onboard the other 34
+    projects by hand.
 - Standardize on a single JBI service account for Jira writes, so inbound
-  events it authored can be suppressed for loop-prevention.
+  events it authored can be suppressed for loop-prevention (Invariant C). Record
+  its `accountId` as `Settings.jira_bot_account_id`.
 - Confirm the service account can read user **email** (identity resolution, §5).
+- Confirm the rule's webhook payload includes **`fields.status.statusCategory`**,
+  which the reverse status mapping depends on (§4.1) — include it explicitly in
+  the rule's request body rather than relying on the default payload shape.
 - Phase 2: custom fields for **release flags** and **Target Milestone**, and the
   **Epic** issue type available.
 
@@ -615,6 +829,11 @@ its bug via the existing link.
   under that account, which is why reverse comments are text-attributed rather
   than impersonated.
 - Confirm the per-Product/Component **webhook** is registered so bugs reach JBI.
+- Record the login of JBI's Bugzilla account as `Settings.bugzilla_bot_login`,
+  so the forward-path echo gate can recognize JBI's own reverse writes
+  (Invariant C, D6b). Deploying the reverse writers without this set is the one
+  configuration mistake that reintroduces the loop, so D12's pilot-enablement
+  checklist asserts it is non-empty before the pilot flag is flipped.
 
 ---
 
@@ -635,6 +854,22 @@ its bug via the existing link.
    future shared loop-prevention state would live).
 6. **Comment attribution format** for BMO write-back — confirm the exact wording
    with stakeholders.
+7. **Jira Cloud plan tier** — multi-project Automation rule scope requires
+   Premium. Blocks the central-rule design in §12; verify before D6. Fallback is
+   a pilot-only single-project rule, treated as a blocker to onboarding a second
+   project rather than a licence to hand-build 35 rules.
+8. **`statusCategory` in the Automation payload** — confirm the "Send web
+   request" body carries `fields.status.statusCategory.key`; the entire reverse
+   status mapping (§4.1) depends on it. Cheap to verify with one test rule.
+9. **`resolution_map` injectivity** — true for all 17 prod configs that define
+   one today, and enforced at config load going forward (D9). The risk is a
+   future project wanting a genuinely many-to-one resolution map; it would fail
+   validation and need an explicit reverse override, which is the intended
+   loud-failure behavior rather than a silent wrong write.
+10. **Actor-check coverage on the Bugzilla side** — `WebhookEvent.user` is
+    `Optional`, so the echo gate cannot fire on an actor-less event. Mitigated
+    by D7 read-before-write; worth confirming with BMO which event classes can
+    legitimately arrive without a `user`.
 
 ---
 
@@ -645,6 +880,17 @@ its bug via the existing link.
 - **Story Points / Iteration availability per Component** — confirm with BMO
   admins during the Phase 2 field-mapping work; determines whether these are
   Jira-only (write-back-suppressed) or genuinely bidirectional.
+- **Reverse status fidelity** — is three-category granularity (§4.1) acceptable
+  to the pilot team, or do they want per-project `reverse_status_overrides` from
+  day one? Proposed: ship on the defaults, add overrides only when a project
+  demonstrates a need.
+- **Default reverse resolution** — confirm `FIXED` is the right
+  `default_reverse_resolution` for the pilot, versus leaving resolution untouched
+  and routing every green-category close to the reconciliation report.
+- **Ownership of the central Automation rule** — which team/service account
+  administers it, and what the change process is for adding a project to its JQL
+  scope. This is now a shared operational asset rather than each project's own
+  config.
 - **Relationship to existing JBI automation** — extend, do not replace
   (constraint #6); Phase 1 confirms what can be extended before building anything
   parallel.
