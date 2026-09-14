@@ -30,6 +30,7 @@ from jbi.errors import IgnoreInvalidRequestError
 from jbi.jira_inbound.models import JiraWebhookRequest
 from jbi.jira_steps import ReverseContext, ReverseExecutor
 from jbi.models import Action, Actions
+from jbi.visibility import bug_restriction_reason
 
 logger = logging.getLogger(__name__)
 
@@ -121,9 +122,11 @@ def execute_jira_event(event: JiraWebhookRequest, actions: Actions) -> dict:
     except BugNotAccessibleError as err:
         raise _ignore(f"bug {bug_id} is not accessible: {err}") from err
 
-    if bug.is_private:
-        # Same rule as the forward path: JBI does not handle private bugs.
-        raise _ignore(f"bug {bug_id} is private")
+    if reason := bug_restriction_reason(bug):
+        # Same definition of "restricted" as the forward path, and the same
+        # consequence: no field of a security or embargoed bug is touched,
+        # not just its comments.
+        raise _ignore(f"bug {bug_id} is restricted: {reason}")
 
     # Cross-check the link in the other direction. A one-sided link means the
     # bug was re-pointed at a different issue, and writing to it would put the

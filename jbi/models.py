@@ -168,6 +168,14 @@ class ActionParams(BaseModel, frozen=True):
     phabricator_review_status: Optional[str] = None
     phabricator_changes_requested_status: Optional[str] = None
 
+    # Copying Jira comment *text* onto a bug is gated separately from field
+    # sync, and defaults off. A field value is a small, enumerable thing; a
+    # comment is free text that may quote an embargoed issue, and publishing
+    # it onto a world-readable bug cannot be undone. Enabling this asserts
+    # that the Automation rule sends `comment.visibility` and
+    # `fields.security`, which the guard needs to fail closed (R-12).
+    reverse_comment_sync_enabled: bool = False
+
     # Enables the Jira -> BMO inbound path (the `/jira_webhook` spine and its
     # reverse field writers) for this action. Defaults to off: no inbound
     # Jira event has any effect until an action opts in.

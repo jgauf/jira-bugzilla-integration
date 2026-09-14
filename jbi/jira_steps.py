@@ -21,7 +21,7 @@ from jbi.bugzilla.models import Bug
 from jbi.identity import UNASSIGNED_EMAIL, get_identity_map
 from jbi.jira_inbound.models import JiraWebhookRequest
 from jbi.models import Action, Context
-from jbi.visibility import can_write_comment
+from jbi.visibility import can_copy_jira_text_to_bug
 from jbi.writeback import (
     bmo_wins_conflict,
     is_writeback_allowed,
@@ -330,6 +330,11 @@ def writeback_summary(
     if not summary:
         return (ReverseStepStatus.NOOP, context)
 
+    # A summary is free text too: the title of an embargoed issue can itself
+    # describe an unpublished vulnerability.
+    if can_copy_jira_text_to_bug(context.bug, context.event):
+        return (ReverseStepStatus.INCOMPLETE, context)
+
     if _skip_on_conflict(context, "summary", context.bug.summary):
         return (ReverseStepStatus.NOOP, context)
 
@@ -389,7 +394,10 @@ def writeback_comment(
     if not context.event.comment:
         return (ReverseStepStatus.NOOP, context)
 
-    if not can_write_comment(context.bug):
+    if not context.action.parameters.reverse_comment_sync_enabled:
+        return (ReverseStepStatus.NOOP, context)
+
+    if can_copy_jira_text_to_bug(context.bug, context.event):
         return (ReverseStepStatus.INCOMPLETE, context)
 
     text = format_comment(context)

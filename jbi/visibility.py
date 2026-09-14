@@ -3,27 +3,18 @@
 Comments are the risky direction: Jira issues live in an internal planning
 tool, Bugzilla bugs are frequently world-readable, and a comment copied from
 one to the other cannot be un-published. The rule is therefore conservative --
-JBI writes comments only onto bugs whose audience it is sure of, and stays
-out of restricted ones entirely.
+JBI copies free text only when both ends allow it: the bug's audience must be
+one JBI can reason about, and the Jira content must carry no restriction of
+its own.
 """
 
 import logging
 from typing import Optional
 
 from jbi.bugzilla.models import Bug
+from jbi.jira_inbound.models import JiraWebhookRequest
 
 logger = logging.getLogger(__name__)
-
-
-def is_bug_restricted(bug: Bug) -> bool:
-    """Return True when the bug is private or limited to Bugzilla groups.
-
-    `groups` is BMO's mechanism for confidential bugs (security, employee-only,
-    embargoed). A non-empty list means the bug has a restricted audience.
-    """
-    if bug.is_private:
-        return True
-    return bool(bug.groups)
 
 
 def bug_restriction_reason(bug: Bug) -> Optional[str]:
@@ -41,20 +32,66 @@ def bug_restriction_reason(bug: Bug) -> Optional[str]:
     return None
 
 
-def can_write_comment(bug: Bug) -> bool:
-    """Return True when a Jira comment may be copied onto this bug.
+# --- Jira-side confidentiality --------------------------------------------
+#
+# The mirror of the checks above, and the more dangerous direction: a
+# Bugzilla bug is frequently world-readable, so copying an embargoed Jira
+# comment onto one publishes it irrevocably.
+#
+# These fail *closed*. The Automation rule's payload is assembled by a rule
+# JBI does not control, so "the field is absent" cannot be read as "there is
+# no restriction" -- it is equally consistent with a rule that was never
+# configured to send it. Copying Jira text to BMO therefore requires the
+# action to opt in via `reverse_comment_sync_enabled`, which is an operator
+# asserting the rule sends these fields.
 
-    Restricted bugs are skipped rather than handled: JBI has no way to
-    reproduce a bug's group restrictions on a comment, and getting that wrong
-    in either direction is worse than not syncing the comment at all. The
-    skipped comment is logged so it can be surfaced by the reconciliation
-    report (R-13).
+
+def jira_comment_restriction_reason(event: JiraWebhookRequest) -> Optional[str]:
+    """Return why an inbound Jira comment is confidential, or `None`."""
+    comment = event.comment
+    if comment is None:
+        return None
+    if comment.visibility is not None:
+        target = comment.visibility.value or comment.visibility.type or "a role/group"
+        return f"Jira comment is restricted to {target}"
+    if comment.jsdPublic is False:
+        return "Jira comment is internal-only (jsdPublic=false)"
+    return None
+
+
+def jira_issue_restriction_reason(event: JiraWebhookRequest) -> Optional[str]:
+    """Return why an inbound Jira issue is embargoed, or `None`.
+
+    An issue security level is Jira's embargo marker. When one is set, no
+    free text from that issue may reach BMO -- not its comments, and not its
+    summary, which can itself describe an unpublished vulnerability.
     """
-    if is_bug_restricted(bug):
-        logger.info(
-            "Bug %s is restricted; not writing Jira content back to it",
-            bug.id,
-            extra={"bug": {"id": bug.id}},
-        )
-        return False
-    return True
+    issue = event.issue
+    fields = issue.fields if issue else None
+    security = fields.security if fields else None
+    if security is not None:
+        name = security.name or security.id or "restricted"
+        return f"Jira issue has security level {name!r}"
+    return None
+
+
+def can_copy_jira_text_to_bug(bug: Bug, event: JiraWebhookRequest) -> Optional[str]:
+    """Return the reason free text must not be copied, or `None` if it may.
+
+    Checks both ends: the bug's audience (can JBI reason about who will read
+    this?) and the Jira content's own classification.
+    """
+    for reason in (
+        bug_restriction_reason(bug),
+        jira_issue_restriction_reason(event),
+        jira_comment_restriction_reason(event),
+    ):
+        if reason:
+            logger.info(
+                "Not copying Jira text to Bug %s: %s",
+                bug.id,
+                reason,
+                extra={"bug": {"id": bug.id}},
+            )
+            return reason
+    return None

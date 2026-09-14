@@ -65,6 +65,21 @@ class JiraProject(LenientModel):
     key: Optional[str] = None
 
 
+class JiraVisibility(LenientModel):
+    """A role/group restriction on a Jira comment."""
+
+    type: Optional[str] = None
+    value: Optional[str] = None
+    identifier: Optional[str] = None
+
+
+class JiraSecurityLevel(LenientModel):
+    """An issue security level -- Jira's embargo mechanism."""
+
+    id: Optional[str] = None
+    name: Optional[str] = None
+
+
 class JiraIssueFields(LenientModel):
     """The subset of issue fields the reverse direction reads."""
 
@@ -74,6 +89,8 @@ class JiraIssueFields(LenientModel):
     priority: Optional[JiraNamedValue] = None
     assignee: Optional[JiraUser] = None
     project: Optional[JiraProject] = None
+    # Set when the issue carries an issue security level (embargoed work).
+    security: Optional[JiraSecurityLevel] = None
 
 
 class JiraIssue(LenientModel):
@@ -122,6 +139,10 @@ class JiraComment(LenientModel):
     body: Optional[str] = None
     author: Optional[JiraUser] = None
     created: Optional[SmartAwareDatetime] = None
+    # Present when the comment is limited to a project role or group.
+    visibility: Optional[JiraVisibility] = None
+    # Jira Service Management: False means an internal-only comment.
+    jsdPublic: Optional[bool] = None
 
 
 class JiraWebhookRequest(LenientModel):

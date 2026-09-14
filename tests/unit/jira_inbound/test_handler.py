@@ -210,3 +210,20 @@ def test_bug_without_matching_whiteboard_tag_is_ignored(
 
     with pytest.raises(IgnoreInvalidRequestError):
         execute_jira_event(jira_webhook_event, inbound_actions)
+
+
+def test_group_restricted_bug_gets_no_reverse_writes(
+    mocked_jira, mocked_bugzilla, bug_factory, jira_webhook_event, inbound_actions
+):
+    """A security bug is off limits to the reverse direction entirely -- not
+    just for comments, but for every field."""
+    mocked_jira.get_issue_remote_links.return_value = [{"globalId": "654321"}]
+    mocked_bugzilla.get_bug.return_value = bug_factory(
+        id=654321, whiteboard="[devtest]", is_private=False, groups=["core-security"]
+    )
+
+    with pytest.raises(IgnoreInvalidRequestError) as exc_info:
+        execute_jira_event(jira_webhook_event, inbound_actions)
+
+    assert "core-security" in str(exc_info.value)
+    assert not mocked_bugzilla.update_bug.called

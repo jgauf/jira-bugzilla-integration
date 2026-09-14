@@ -11,7 +11,11 @@ import pytest
 
 from jbi import jira_steps
 from jbi.identity import UNASSIGNED_EMAIL, IdentityEntry, IdentityMap
-from jbi.jira_inbound.models import JiraNamedValue
+from jbi.jira_inbound.models import (
+    JiraNamedValue,
+    JiraSecurityLevel,
+    JiraVisibility,
+)
 from jbi.jira_steps import ReverseContext, ReverseStepStatus
 
 
@@ -530,6 +534,7 @@ def test_comment_is_copied_with_attribution(
         action_factory,
         bug_factory,
         jira_webhook_request_factory,
+        action_kwargs={"parameters__reverse_comment_sync_enabled": True},
         with_comment=True,
         comment__body="Looks good to me.",
         comment__author__displayName="Jane Reviewer",
@@ -566,6 +571,7 @@ def test_comment_attribution_prefers_the_identity_map(
         action_factory,
         bug_factory,
         jira_webhook_request_factory,
+        action_kwargs={"parameters__reverse_comment_sync_enabled": True},
         with_comment=True,
         comment__body="hi",
         comment__author=jira_user_factory(
@@ -595,6 +601,7 @@ def test_comment_is_not_written_to_a_restricted_bug(
         bug_factory,
         jira_webhook_request_factory,
         bug_kwargs={"groups": ["core-security"]},
+        action_kwargs={"parameters__reverse_comment_sync_enabled": True},
         with_comment=True,
         comment__body="internal discussion",
     )
@@ -616,6 +623,7 @@ def test_long_comment_is_truncated_rather_than_dropped(
         action_factory,
         bug_factory,
         jira_webhook_request_factory,
+        action_kwargs={"parameters__reverse_comment_sync_enabled": True},
         with_comment=True,
         comment__body="x" * 100_000,
     )
@@ -656,6 +664,7 @@ def test_duplicate_comment_is_not_posted_twice(
         action_factory,
         bug_factory,
         jira_webhook_request_factory,
+        action_kwargs={"parameters__reverse_comment_sync_enabled": True},
         with_comment=True,
         comment__body="Looks good to me.",
         comment__author__displayName="Jane Reviewer",
@@ -817,3 +826,156 @@ def test_suppressed_planning_fields_are_logged(
         ReverseExecutor(bugzilla_service=mocked_service)(context)
 
     assert any("Jira-owned fields" in record.message for record in capturelogs.records)
+
+
+# --- Jira-side confidentiality (R-12 hardening) -----------------------------
+
+
+def _commented(action_factory, bug_factory, factory, **kw):
+    return make_context(
+        action_factory,
+        bug_factory,
+        factory,
+        action_kwargs={"parameters__reverse_comment_sync_enabled": True},
+        with_comment=True,
+        comment__body="embargoed: the exploit works like this",
+        **kw,
+    )
+
+
+def test_comment_sync_is_off_by_default(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+):
+    """Copying free text to a world-readable bug requires an explicit opt-in,
+    separate from field sync."""
+    context = make_context(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        with_comment=True,
+        comment__body="internal chatter",
+    )
+
+    status, _ = jira_steps.writeback_comment(context, bugzilla_service=mocked_service)
+
+    assert status == ReverseStepStatus.NOOP
+    assert not mocked_bugzilla.update_bug.called
+
+
+def test_role_restricted_jira_comment_is_not_copied(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+):
+    context = _commented(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        comment__visibility=JiraVisibility(type="role", value="Administrators"),
+    )
+
+    status, _ = jira_steps.writeback_comment(context, bugzilla_service=mocked_service)
+
+    assert status == ReverseStepStatus.INCOMPLETE
+    assert not mocked_bugzilla.update_bug.called
+
+
+def test_internal_only_jsd_comment_is_not_copied(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+):
+    context = _commented(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        comment__jsdPublic=False,
+    )
+
+    status, _ = jira_steps.writeback_comment(context, bugzilla_service=mocked_service)
+
+    assert status == ReverseStepStatus.INCOMPLETE
+    assert not mocked_bugzilla.update_bug.called
+
+
+def test_comment_on_an_embargoed_issue_is_not_copied(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+):
+    """An issue security level is Jira's embargo marker."""
+    context = _commented(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        issue__fields__security=JiraSecurityLevel(name="Security Team Only"),
+    )
+
+    status, _ = jira_steps.writeback_comment(context, bugzilla_service=mocked_service)
+
+    assert status == ReverseStepStatus.INCOMPLETE
+    assert not mocked_bugzilla.update_bug.called
+
+
+def test_summary_of_an_embargoed_issue_is_not_copied(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+    jira_changelog_item_factory,
+):
+    """The title of an embargoed issue can itself describe an unpublished
+    vulnerability, so the guard covers summary too -- not only comments."""
+    context = make_context(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        bug_kwargs={"summary": "Old title"},
+        changelog__items=[
+            jira_changelog_item_factory(
+                field="summary", fromString="Old title", toString="CVE-2026-1 RCE"
+            )
+        ],
+        issue__fields__summary="CVE-2026-1 RCE in the parser",
+        issue__fields__security=JiraSecurityLevel(name="Embargoed"),
+    )
+
+    status, _ = jira_steps.writeback_summary(context, bugzilla_service=mocked_service)
+
+    assert status == ReverseStepStatus.INCOMPLETE
+    assert not mocked_bugzilla.update_bug.called
+
+
+def test_status_still_syncs_for_an_embargoed_issue(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+):
+    """The guard is scoped to free text. A status value carries no embargoed
+    detail, and blocking it would silently strand the bug's state."""
+    context = make_context(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        bug_kwargs={"status": "NEW", "resolution": ""},
+        issue__fields__status__statusCategory__key="indeterminate",
+        issue__fields__security=JiraSecurityLevel(name="Embargoed"),
+    )
+
+    status, _ = jira_steps.writeback_status(context, bugzilla_service=mocked_service)
+
+    assert status == ReverseStepStatus.SUCCESS
+    assert mocked_bugzilla.update_bug.call_args.kwargs["status"] == "ASSIGNED"
