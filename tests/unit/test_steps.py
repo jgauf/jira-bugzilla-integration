@@ -3808,3 +3808,90 @@ def test_status_category_helper_returns_none_for_unreadable_issue(
 
     assert service.get_issue_status_category(context, "JBI-234") is None
     assert service.issue_is_in_terminal_state(context, "JBI-234") is False
+
+
+# --- Private comments and attachments never reach Jira ----------------------
+
+
+def test_private_comment_is_not_copied_to_jira(
+    action_context_factory, mocked_jira, capturelogs
+):
+    """A private comment on an otherwise-public bug is still confidential.
+    `BugzillaClient.get_bug` re-fetches it when JBI can read it, so without
+    this guard the text reaches Jira verbatim."""
+    context = action_context_factory(
+        operation=Operation.COMMENT,
+        bug__with_comment=True,
+        bug__comment__body="embargoed details",
+        bug__comment__id=42,
+        bug__comment__is_private=True,
+        event__target="comment",
+        jira__issue="JBI-234",
+        current_step="create_comment",
+    )
+
+    with capturelogs.for_logger("jbi.steps").at_level(logging.INFO):
+        result, _ = steps.create_comment(context, jira_service=JiraService(mocked_jira))
+
+    assert result == steps.StepStatus.NOOP
+    assert not mocked_jira.issue_add_comment.called
+    assert any("is private" in record.message for record in capturelogs.records)
+
+
+def test_public_comment_is_still_copied(action_context_factory, mocked_jira):
+    context = action_context_factory(
+        operation=Operation.COMMENT,
+        bug__with_comment=True,
+        bug__comment__body="ordinary comment",
+        bug__comment__is_private=False,
+        event__target="comment",
+        event__user__login="person@mozilla.com",
+        jira__issue="JBI-234",
+        current_step="create_comment",
+    )
+
+    result, _ = steps.create_comment(context, jira_service=JiraService(mocked_jira))
+
+    assert result == steps.StepStatus.SUCCESS
+    assert mocked_jira.issue_add_comment.called
+
+
+def test_private_attachment_is_not_described_in_jira(
+    action_context_factory, mocked_jira
+):
+    """Attachment events post the description and filename into Jira."""
+    context = action_context_factory(
+        operation=Operation.ATTACHMENT,
+        bug__with_attachment=True,
+        bug__attachment__is_private=True,
+        bug__attachment__description="exploit proof-of-concept",
+        event__target="attachment",
+        jira__issue="JBI-234",
+        current_step="create_comment",
+    )
+
+    result, _ = steps.create_comment(context, jira_service=JiraService(mocked_jira))
+
+    assert result == steps.StepStatus.NOOP
+    assert not mocked_jira.issue_add_comment.called
+
+
+def test_private_attachment_is_not_linked_in_jira(action_context_factory, mocked_jira):
+    """The remote link carries the attachment description as its title."""
+    context = action_context_factory(
+        operation=Operation.ATTACHMENT,
+        bug__with_attachment=True,
+        bug__attachment__is_private=True,
+        bug__attachment__content_type="text/x-phabricator-request",
+        bug__attachment__file_name="phabricator-D1234-url.txt",
+        event__target="attachment",
+        jira__issue="JBI-234",
+        current_step="maybe_add_phabricator_link",
+    )
+
+    result, _ = steps.maybe_add_phabricator_link(
+        context, jira_service=JiraService(mocked_jira)
+    )
+
+    assert result == steps.StepStatus.NOOP
+    assert not mocked_jira.create_or_update_issue_remote_links.called

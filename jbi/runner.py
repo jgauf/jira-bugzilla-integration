@@ -29,6 +29,7 @@ from jbi.models import (
 )
 from jbi.queue import DeadLetterQueue
 from jbi.steps import StepStatus
+from jbi.visibility import bug_restriction_reason
 
 logger = logging.getLogger(__name__)
 
@@ -300,8 +301,16 @@ def execute_action(
         operation=Operation.HANDLE,
     )
     try:
-        if bug.is_private:
-            raise IgnoreInvalidRequestError("private bugs are not supported")
+        # Security/embargoed bugs never reach Jira. `is_private` alone is not
+        # enough: it is an optional payload field, and BMO expresses
+        # confidentiality through `groups`. Checked here on the payload as an
+        # early exit, and again after the refresh below, because a bug can
+        # gain a group between the webhook firing and JBI processing it --
+        # a window the dead-letter queue can widen to days.
+        if reason := bug_restriction_reason(bug):
+            raise IgnoreInvalidRequestError(
+                f"restricted bugs are not supported: {reason}"
+            )
 
         # Invariant C, BMO side: a reverse write into Bugzilla fires this same
         # webhook, so without this gate every Jira -> BMO write would bounce
@@ -338,6 +347,14 @@ def execute_action(
             # This can happen if the bug is made private after the webhook
             # is processed (eg. if it spent some time in the DL queue)
             raise IgnoreInvalidRequestError(str(err)) from err
+
+        # Re-check on the refreshed bug. `BugNotAccessibleError` above only
+        # catches bugs JBI *cannot read*; a bug restricted to a group JBI
+        # belongs to stays readable, and would otherwise sync.
+        if reason := bug_restriction_reason(bug):
+            raise IgnoreInvalidRequestError(
+                f"restricted bugs are not supported: {reason}"
+            )
 
         # R-01: drop actions whose configured Product/Component scope does not
         # cover this bug. This is evaluated after `refresh_bug_data` so we scope

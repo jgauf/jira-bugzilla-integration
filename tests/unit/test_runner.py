@@ -97,7 +97,7 @@ def test_request_is_ignored_because_private(
     with pytest.raises(IgnoreInvalidRequestError) as exc_info:
         execute_action(request=webhook, actions=actions)
 
-    assert str(exc_info.value) == "private bugs are not supported"
+    assert str(exc_info.value) == "restricted bugs are not supported: bug is private"
 
 
 def test_added_comment_without_linked_issue_is_ignored(
@@ -327,10 +327,14 @@ async def test_execute_or_queue_exception(
     bugzilla_webhook_request,
 ):
     mock_queue.is_blocked.return_value = False
-    # should trigger an exception for this scenario
-    await execute_or_queue(
-        request=bugzilla_webhook_request, queue=mock_queue, actions=actions
-    )
+    # Force an unexpected failure inside execute_action. This used to happen
+    # implicitly, via the MagicMock bug returned by the refresh, but the
+    # restriction guard now rejects that mock before it can blow up further
+    # down -- so the failure is made explicit rather than incidental.
+    with mock.patch("jbi.runner.execute_action", side_effect=ValueError("boom")):
+        await execute_or_queue(
+            request=bugzilla_webhook_request, queue=mock_queue, actions=actions
+        )
     mock_queue.is_blocked.assert_called_once()
     mock_queue.postpone.assert_not_called()
     mock_queue.track_failed.assert_called_once()
@@ -1174,3 +1178,57 @@ def test_no_suppression_when_bot_login_is_unconfigured(
     execute_action(request=webhook, actions=actions)
 
     assert mocked_jira.create_issue.called
+
+
+# --- Restricted bugs never reach Jira (security hardening) ------------------
+
+
+def test_group_restricted_bug_is_not_synced(
+    webhook_request_factory, actions, mocked_jira, mocked_bugzilla
+):
+    """`groups` is how BMO marks security/embargoed bugs. Checking only
+    `is_private` -- an optional payload field -- would let these through."""
+    webhook = webhook_request_factory(
+        bug__is_private=False, bug__groups=["core-security"]
+    )
+    mocked_bugzilla.get_bug.return_value = webhook.bug
+
+    with pytest.raises(IgnoreInvalidRequestError) as exc_info:
+        execute_action(request=webhook, actions=actions)
+
+    assert "core-security" in str(exc_info.value)
+    assert not mocked_jira.create_issue.called
+    assert not mocked_jira.update_issue_field.called
+
+
+def test_bug_missing_is_private_but_in_groups_is_not_synced(
+    webhook_request_factory, actions, mocked_jira, mocked_bugzilla
+):
+    """`is_private` is Optional, so an absent value reads as False. The
+    groups check is what makes that safe."""
+    webhook = webhook_request_factory(bug__is_private=None, bug__groups=["secure"])
+    mocked_bugzilla.get_bug.return_value = webhook.bug
+
+    with pytest.raises(IgnoreInvalidRequestError):
+        execute_action(request=webhook, actions=actions)
+
+    assert not mocked_jira.create_issue.called
+
+
+def test_bug_restricted_after_the_webhook_fired_is_not_synced(
+    webhook_request_factory, actions, mocked_jira, mocked_bugzilla, bug_factory
+):
+    """The payload says public, the refreshed bug says restricted -- the case
+    the dead-letter queue makes likely, since an item can sit there for days.
+    `BugNotAccessibleError` does not cover it: a bug restricted to a group JBI
+    belongs to stays perfectly readable."""
+    webhook = webhook_request_factory(bug__is_private=False, bug__groups=[])
+    mocked_bugzilla.get_bug.return_value = bug_factory(
+        id=webhook.bug.id, whiteboard="[devtest]", groups=["core-security"]
+    )
+
+    with pytest.raises(IgnoreInvalidRequestError) as exc_info:
+        execute_action(request=webhook, actions=actions)
+
+    assert "core-security" in str(exc_info.value)
+    assert not mocked_jira.create_issue.called
