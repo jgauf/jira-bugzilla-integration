@@ -158,6 +158,31 @@ survive the round trip identically — which is exactly the risk the non-inverti
 `status_map` creates (§4.1) — would be rewritten with a *different* value each
 pass, corrupting the field rather than merely wasting a call.
 
+**Invariant D — confidential content never crosses, in either direction.**
+Both systems hold restricted work, and both can publish it to an audience the
+other never intended. The rule is symmetric and fails *closed*.
+
+- *BMO → Jira:* a bug is restricted when `is_private` is true **or** `groups`
+  is non-empty. `is_private` alone is insufficient — it is an optional payload
+  field, so an absent value reads as "public", while `groups` is the actual
+  mechanism behind security, embargoed and employee-only bugs. Restricted bugs
+  are never synced at all, checked on the inbound payload *and again on the
+  refreshed bug*, because a bug can gain a group while the event sits in the
+  dead-letter queue. Independently, private **comments** and private
+  **attachments** on otherwise-public bugs are never copied into Jira.
+- *Jira → BMO:* free text (comment bodies and summaries) is not copied when
+  the comment carries a `visibility` restriction, when it is JSM
+  internal-only, or when the issue has an **issue security level** set.
+  Restricted bugs receive no reverse writes of any kind.
+- *Why fail closed:* the Automation payload is assembled by a rule JBI does
+  not control, so "the field is absent" cannot be read as "there is no
+  restriction". Copying Jira text to BMO therefore requires an explicit
+  per-action opt-in (`reverse_comment_sync_enabled`, default off), which is an
+  operator asserting the rule sends those fields.
+- *Scope:* the guard covers free text, not enumerated values. A status or
+  priority carries no embargoed detail, and blocking it would silently strand
+  a bug's state.
+
 **Consequence — the two directions are deliberately asymmetric.**
 BMO→Jira may CREATE-or-UPDATE; Jira→BMO is UPDATE-only. Beyond enforcing
 Invariant B, the same correlation gate that finds "the bug behind this issue"
@@ -469,7 +494,7 @@ codebase, and the specific files/functions a PR will touch. Verdicts:
 | **R-09** release flags → Jira | ❌ | Type `cf_status_firefoxNN` on `Bug`; step `mirror_release_flags`. |
 | **R-10** Target Milestone → Jira | ❌ | Add `target_milestone` to `Bug`; step `mirror_target_milestone`. |
 | **R-11** identity matching | ❌ | `jbi/identity.py` + `config/identity_map.{env}.yaml` + `bin/seed_identity_map.py` (§5). |
-| **R-12** visibility on write-back | ❌ | `jbi/visibility.py` guard from `Bug.groups`/`is_private`. |
+| **R-12** visibility on write-back | ❌ | `jbi/visibility.py`: `bug_restriction_reason` (BMO `groups`/`is_private`, used by *both* directions) + `can_copy_jira_text_to_bug` (Jira `comment.visibility`, `jsdPublic`, `fields.security`). Forward path also drops private comments/attachments. Gated by `reverse_comment_sync_enabled`, default off. See Invariant D. |
 | **R-13** reconciliation report | ❌ | `jbi/reconcile.py` standalone job (retry.py pattern). |
 
 ---
@@ -610,8 +635,13 @@ flows both directions) with **no reliance on inverting `status_map`.** ·
 *Depends:* D6, D6b, D7, D8.
 
 **D10 — Reverse comment writer + visibility guard (R-12).**
-*Accomplishes:* comment sync from Jira to BMO that can never leak internal
-context onto a public bug. · *Files:* `jbi/visibility.py` (guard from
+*Accomplishes:* comment sync from Jira to BMO, refused whenever either end is
+confidential (Invariant D). Note for reviewers: v2 of this plan claimed the
+guard "can never leak internal context onto a public bug" while specifying
+only a check on the *BMO* side — it would have blocked writes to a restricted
+bug while happily copying an embargoed Jira comment onto a public one. The
+Jira-side checks and the forward-path private comment/attachment fixes close
+that gap. · *Files:* `jbi/visibility.py` (guard from
 `Bug.groups`/`is_private`), `jira_steps.py writeback_comment` with the
 "from Jira, by \<name\>" attribution. · *Tests:* `test_visibility.py` +
 `test_jira_steps.py` — a public bug receives the comment; a confidential/private
@@ -866,7 +896,14 @@ its bug via the existing link.
    future project wanting a genuinely many-to-one resolution map; it would fail
    validation and need an explicit reverse override, which is the intended
    loud-failure behavior rather than a silent wrong write.
-10. **Actor-check coverage on the Bugzilla side** — `WebhookEvent.user` is
+10. **Confidentiality field shapes** — the guard depends on the Automation
+    payload carrying `comment.visibility`, `comment.jsdPublic` and
+    `fields.security`. Absent fields are treated as unrestricted *only*
+    because enabling `reverse_comment_sync_enabled` asserts the rule sends
+    them; verify the real shapes in the sandbox before enabling it anywhere.
+    Confirm too what a group-restricted BMO bug's webhook payload contains
+    for `is_private` and `groups`.
+11. **Actor-check coverage on the Bugzilla side** — `WebhookEvent.user` is
     `Optional`, so the echo gate cannot fire on an actor-less event. Mitigated
     by D7 read-before-write; worth confirming with BMO which event classes can
     legitimately arrive without a `user`.
