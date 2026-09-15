@@ -40,7 +40,7 @@ rather than infer it.
 | Loop prevention | **Symmetric by design.** Both inbound paths drop events authored by JBI's own account — Jira `accountId` inbound, `WebhookEvent.user.login` on the Bugzilla side — backed by read-before-write idempotency. (Invariant C) |
 | State store | **No new datastore in Phase 1.** Correlation reuses the existing `see_also`/remote-link; identity lives in YAML; loop-prevention is stateless. Redis is considered only if multi-instance ephemeral state later proves necessary. |
 | Conflict policy | **BMO wins for execution fields; Jira wins for planning-only fields.** (Defined in §4.) |
-| Pilot | **Core :: Machine Learning: On-Device.** |
+| Pilot | **Core :: Machine Learning: On Device.** |
 | Identity mapping | **Email-first automatic resolution + a machine-seeded YAML override file for mismatches only + reconciliation-driven upkeep.** (§5.) |
 | Change discipline | **Extend, don't break.** All new behavior is additive, config-gated, and default-OFF; only the pilot opts in. (§6.) |
 | Build vs. integrate | **Integration path** (extend JBI) rather than extending BMO. Recorded in ADR `docs/adrs/004-bidirectional-sync.md`. |
@@ -253,15 +253,22 @@ map** instead of N:
 
 | Jira `statusCategory.key` (colour) | BMO status written |
 |---|---|
-| `new` (blue-gray) | `NEW` — or `REOPENED` if the bug is currently in a resolved state |
+| `new` (blue-gray) | **nothing** — except `REOPENED` when the bug is currently resolved (see below) |
 | `indeterminate` (yellow) | `ASSIGNED` |
 | `done` (green) | resolved — see the resolution rule below |
 
-The `new`-category rule is state-dependent on purpose: BMO distinguishes "never
-worked" from "was closed and is now open again," and writing `NEW` over a
-previously-resolved bug would silently erase that history. The current BMO status
-is already available from D7's read-before-write fetch, so this costs no extra
-call.
+The `new`-category rule is deliberately asymmetric: **reverse status only ever
+moves a bug forward.** Verified against the pilot project's real workflow, that
+category contains Backlog, To Do *and* **Blocked** — so mapping it to `NEW`
+would regress an in-progress bug to "never worked on" whenever someone marked
+the Jira issue blocked. Because overrides are keyed by category, `Blocked` cannot
+be distinguished from `To Do`; and BMO does not model blocking as a status at all
+(it uses `depends_on`), so there is nothing to mirror. The one transition in that
+category worth writing is a genuine reopen, where BMO's `REOPENED` preserves the
+fact that the bug was once closed. The current BMO status comes from D7's
+read-before-write fetch, so this costs no extra call. A project whose
+`new` statuses really do mean "not started" can opt back in with an explicit
+`reverse_status_overrides` entry.
 
 *Resolution — invert `resolution_map`, which unlike `status_map` actually is
 invertible.* `resolution_map` maps a BMO resolution to a Jira **resolution**
@@ -382,7 +389,7 @@ concrete and, equally important, make each PR safe and easy to review.
    `config/config.*.yaml` must continue to parse unchanged; adding a field must
    never force a config migration.
 4. **The suite stays green and the pilot is the only opt-in.** New behavior ships
-   behind config and is enabled only for Core :: Machine Learning: On-Device, so
+   behind config and is enabled only for Core :: Machine Learning: On Device, so
    production impact is contained and a problem is contained with it.
 5. **Reuse over rebuild.** Where the PRD overlaps existing behavior, we extend it:
    R-02/R-03 build on `maybe_add_phabricator_link`; Jira→BMO close reuses the
@@ -846,6 +853,11 @@ its bug via the existing link.
 - Standardize on a single JBI service account for Jira writes, so inbound
   events it authored can be suppressed for loop-prevention (Invariant C). Record
   its `accountId` as `Settings.jira_bot_account_id`.
+- The BMO side of that pair already exists in production: JBI's Bugzilla writes
+  are authored by **`jira-integration@bots.tld`** (confirmed on the `see_also`
+  of a live pilot-component bug), which is the value for
+  `Settings.bugzilla_bot_login`. Note that Phabricator-driven changes arrive as
+  `phab-bot@bmo.tld`, a *different* account, and must keep flowing.
 - Confirm the service account can read user **email** (identity resolution, §5).
 - Confirm the rule's webhook payload includes **`fields.status.statusCategory`**,
   which the reverse status mapping depends on (§4.1) — include it explicitly in
@@ -912,7 +924,7 @@ its bug via the existing link.
 
 ## 14. Open questions (from PRD §9)
 
-- **Pilot scope** — confirmed: Core :: Machine Learning: On-Device.
+- **Pilot scope** — confirmed: Core :: Machine Learning: On Device.
 - **Conflict resolution policy** — confirmed: BMO wins for execution fields (§4).
 - **Story Points / Iteration availability per Component** — confirm with BMO
   admins during the Phase 2 field-mapping work; determines whether these are
