@@ -136,3 +136,8 @@ dmypy.json
 # Local manual-testing harness (see .local-harness/README.md)
 .local-harness/
 .install.stamp
+
+# Any .env variant may hold real credentials. `.env` alone (above) does
+# not match `.env.sandbox`, `.env.local`, etc.
+.env.*
+!.env.example
