@@ -530,6 +530,23 @@ class JiraService:
         )
         return resp, missing_components
 
+    def get_issue_labels(
+        self, context: ActionContext, issue_key: Optional[str]
+    ) -> list[str]:
+        """Return an issue's current labels, or `[]` if unreadable.
+
+        Needed to retire labels in a JBI-owned namespace: a release flag
+        moving from `affected` to `fixed` has to remove the old label, and the
+        old value is not derivable from the bug's current state.
+        """
+        if not issue_key:
+            return []
+        issue = self.get_issue(context, issue_key)
+        if not issue:
+            return []
+        labels = issue.get("fields", {}).get("labels") or []
+        return [str(label) for label in labels]
+
     def update_issue_labels(
         self, issue_key: str, add: Iterable[str], remove: Optional[Iterable[str]]
     ):

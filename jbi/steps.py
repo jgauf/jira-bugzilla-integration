@@ -754,6 +754,87 @@ def sync_whiteboard_labels(
     return _update_issue_labels(context, jira_service, additions, removals)
 
 
+# R-09/R-10 land in labels rather than in Jira fields, because the pilot
+# project has no release-flag or milestone custom field and `fixVersions` --
+# the only release-shaped field available -- is already written by a separate
+# release automation. Two writers on one field fight; labels cannot collide.
+#
+# Both namespaces are owned by JBI: any label matching the prefix is assumed
+# to be ours and is removed when the corresponding BMO value goes away. That
+# is what keeps a flag flipping from `affected` to `fixed` from leaving both
+# labels behind.
+RELEASE_FLAG_LABEL_PREFIX = "fx"
+MILESTONE_LABEL_PREFIX = "milestone-"
+
+
+def _release_flag_labels(release_flags: dict[str, str]) -> list[str]:
+    """Render BMO release flags as Jira labels, eg. `fx157-fixed`."""
+    labels = []
+    for release, value in sorted(release_flags.items()):
+        # `firefox157` -> `157`, `firefox_esr140` -> `esr140`.
+        short = release.replace("firefox", "", 1).lstrip("_") or release
+        labels.append(
+            f"{RELEASE_FLAG_LABEL_PREFIX}{short}-{value}".replace(" ", ".").lower()
+        )
+    return labels
+
+
+def _milestone_label(target_milestone: Optional[str]) -> Optional[str]:
+    """Render BMO's Target Milestone as a label, eg. `milestone-157-branch`.
+
+    `---` means unset, which is an absence rather than a milestone.
+    """
+    milestone = (target_milestone or "").strip()
+    if not milestone or milestone == "---":
+        return None
+    slug = milestone.lower().replace(" ", "-")
+    return f"{MILESTONE_LABEL_PREFIX}{slug}"
+
+
+def _labels_owned_by(existing: Iterable[str], prefix: str) -> list[str]:
+    """Return the existing labels in a JBI-owned namespace."""
+    return [label for label in existing if str(label).startswith(prefix)]
+
+
+def mirror_release_flags(
+    context: ActionContext, *, jira_service: JiraService
+) -> StepResult:
+    """Mirror BMO per-release status flags onto the Jira issue as labels (R-09)."""
+    desired = _release_flag_labels(context.bug.release_flags)
+
+    current = jira_service.get_issue_labels(context, context.jira.issue)
+    stale = [
+        label
+        for label in _labels_owned_by(current, RELEASE_FLAG_LABEL_PREFIX)
+        if label not in desired
+    ]
+
+    if not desired and not stale:
+        return (StepStatus.NOOP, context)
+
+    return _update_issue_labels(context, jira_service, desired, stale)
+
+
+def mirror_target_milestone(
+    context: ActionContext, *, jira_service: JiraService
+) -> StepResult:
+    """Mirror BMO's Target Milestone onto the Jira issue as a label (R-10)."""
+    desired_label = _milestone_label(context.bug.target_milestone)
+    desired = [desired_label] if desired_label else []
+
+    current = jira_service.get_issue_labels(context, context.jira.issue)
+    stale = [
+        label
+        for label in _labels_owned_by(current, MILESTONE_LABEL_PREFIX)
+        if label not in desired
+    ]
+
+    if not desired and not stale:
+        return (StepStatus.NOOP, context)
+
+    return _update_issue_labels(context, jira_service, desired, stale)
+
+
 def sync_keywords_labels(
     context: ActionContext, *, parameters: ActionParams, jira_service: JiraService
 ) -> StepResult:
