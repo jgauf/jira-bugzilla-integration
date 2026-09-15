@@ -74,30 +74,44 @@ ReverseStep = Callable[..., ReverseStepResult]
 # how its workflow is named. That gives one project-agnostic default map
 # instead of one hand-maintained map per action.
 REVERSE_STATUS_CATEGORY_MAP = {
-    "new": "NEW",
     "indeterminate": "ASSIGNED",
     "done": "RESOLVED",
 }
 
-# BMO distinguishes "never worked on" from "was resolved and is open again".
-# Writing NEW over a previously-resolved bug would erase that distinction, so
-# a bug moving back out of a done state becomes REOPENED instead.
 REOPENED_STATUS = "REOPENED"
 RESOLVED_STATUSES = {"RESOLVED", "VERIFIED", "CLOSED"}
 
+# The `new` category is deliberately absent from the map above: reverse status
+# only ever moves a bug *forward*.
+#
+# Real workflows put more than "not started" in that category -- the pilot
+# project's `new`-category statuses are Backlog, To Do and **Blocked**. So
+# moving an issue from In Progress to Blocked in Jira would otherwise write
+# NEW over ASSIGNED and regress the bug to "never worked on", which is
+# actively wrong rather than merely coarse. BMO does not model "blocked" as a
+# status at all (it uses `depends_on`), so there is nothing to mirror.
+#
+# The one `new`-category transition worth writing is a genuine reopen: an
+# issue leaving a done state, where BMO's REOPENED preserves the fact that
+# the bug was once closed.
+
 
 def reverse_status_for(context: ReverseContext) -> Optional[str]:
-    """Return the BMO status this issue's status category implies."""
+    """Return the BMO status to write, or `None` to leave the status alone."""
     category = context.event.issue.status_category if context.event.issue else None
     if not category:
         return None
 
     overrides = context.action.parameters.reverse_status_overrides
-    status = overrides.get(category) or REVERSE_STATUS_CATEGORY_MAP.get(category)
+    if category in overrides:
+        return overrides[category]
 
-    if status == "NEW" and (context.bug.status or "") in RESOLVED_STATUSES:
-        return REOPENED_STATUS
-    return status
+    if category == "new":
+        if (context.bug.status or "") in RESOLVED_STATUSES:
+            return REOPENED_STATUS
+        return None
+
+    return REVERSE_STATUS_CATEGORY_MAP.get(category)
 
 
 def invert_resolution_map(resolution_map: dict[str, str]) -> dict[str, str]:
@@ -210,14 +224,29 @@ def writeback_status(
     if not (_changed(context, "status") or _changed(context, "resolution")):
         return (ReverseStepStatus.NOOP, context)
 
-    status = reverse_status_for(context)
-    if not status:
+    category = context.event.issue.status_category if context.event.issue else None
+    if not category:
+        # No category means we cannot reason about the status at all: either
+        # the Automation rule does not send it, or the payload is malformed.
         logger.info(
-            "No BMO status for issue %s, nothing to write back",
+            "Issue %s carries no status category, not writing status back",
             context.issue_key,
             extra=context.model_dump(),
         )
         return (ReverseStepStatus.INCOMPLETE, context)
+
+    status = reverse_status_for(context)
+    if not status:
+        # A deliberate no-op, not a failure: see REVERSE_STATUS_CATEGORY_MAP.
+        logger.info(
+            "Issue %s moved to a %r-category status and Bug %s is not "
+            "resolved; leaving its status alone rather than regressing it",
+            context.issue_key,
+            category,
+            context.bug.id,
+            extra=context.model_dump(),
+        )
+        return (ReverseStepStatus.NOOP, context)
 
     resolution = None
     if status in RESOLVED_STATUSES:

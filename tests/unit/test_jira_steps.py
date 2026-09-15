@@ -55,9 +55,6 @@ def make_context(
 @pytest.mark.parametrize(
     "category,bug_status,expected",
     [
-        # The three built-in categories, which every project's workflow uses
-        # regardless of how its statuses are named.
-        ("new", "ASSIGNED", "NEW"),
         ("indeterminate", "NEW", "ASSIGNED"),
         ("done", "ASSIGNED", "RESOLVED"),
         # A bug coming back out of a resolved state is REOPENED, not NEW:
@@ -979,3 +976,108 @@ def test_status_still_syncs_for_an_embargoed_issue(
 
     assert status == ReverseStepStatus.SUCCESS
     assert mocked_bugzilla.update_bug.call_args.kwargs["status"] == "ASSIGNED"
+
+
+@pytest.mark.parametrize("bug_status", ["NEW", "ASSIGNED", "REOPENED"])
+def test_new_category_never_regresses_an_open_bug(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+    capturelogs,
+    bug_status,
+):
+    """The pilot project puts **Blocked** in the `new` category, so moving an
+    issue from In Progress to Blocked would otherwise write NEW over
+    ASSIGNED and regress the bug to "never worked on". Reverse status only
+    moves a bug forward; BMO does not model "blocked" as a status anyway."""
+    import logging
+
+    context = make_context(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        bug_kwargs={"status": bug_status, "resolution": ""},
+        issue__fields__status__name="Blocked",
+        issue__fields__status__statusCategory__key="new",
+    )
+
+    with capturelogs.for_logger("jbi.jira_steps").at_level(logging.INFO):
+        status, _ = jira_steps.writeback_status(
+            context, bugzilla_service=mocked_service
+        )
+
+    assert status == ReverseStepStatus.NOOP
+    assert not mocked_bugzilla.update_bug.called
+    assert any("regressing" in record.message for record in capturelogs.records)
+
+
+def test_new_category_still_reopens_a_resolved_bug(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+):
+    """The one `new`-category transition worth writing: a genuine reopen."""
+    context = make_context(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        bug_kwargs={"status": "RESOLVED", "resolution": "FIXED"},
+        issue__fields__status__name="To Do",
+        issue__fields__status__statusCategory__key="new",
+    )
+
+    status, _ = jira_steps.writeback_status(context, bugzilla_service=mocked_service)
+
+    assert status == ReverseStepStatus.SUCCESS
+    written = mocked_bugzilla.update_bug.call_args.kwargs
+    assert written == {"status": "REOPENED", "resolution": ""}
+
+
+def test_missing_status_category_is_incomplete_not_a_silent_noop(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+):
+    """ "Rule does not send statusCategory" and "Jira moved backwards" are
+    different situations and must not report the same way."""
+    context = make_context(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        issue__fields__status=None,
+    )
+
+    status, _ = jira_steps.writeback_status(context, bugzilla_service=mocked_service)
+
+    assert status == ReverseStepStatus.INCOMPLETE
+    assert not mocked_bugzilla.update_bug.called
+
+
+def test_category_override_can_still_force_a_new_category_write(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+):
+    """An explicit override outranks the never-regress rule, for a project
+    whose `new`-category statuses really do mean "not started"."""
+    context = make_context(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        action_kwargs={"parameters__reverse_status_overrides": {"new": "NEW"}},
+        bug_kwargs={"status": "ASSIGNED", "resolution": ""},
+        issue__fields__status__statusCategory__key="new",
+    )
+
+    status, _ = jira_steps.writeback_status(context, bugzilla_service=mocked_service)
+
+    assert status == ReverseStepStatus.SUCCESS
+    assert mocked_bugzilla.update_bug.call_args.kwargs["status"] == "NEW"
