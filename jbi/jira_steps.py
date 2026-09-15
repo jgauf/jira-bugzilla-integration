@@ -17,6 +17,8 @@ import logging
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Callable, Optional
 
+from requests import exceptions as requests_exceptions
+
 from jbi.bugzilla.models import Bug
 from jbi.identity import UNASSIGNED_EMAIL, get_identity_map
 from jbi.jira_inbound.models import JiraWebhookRequest
@@ -217,6 +219,20 @@ def _skip_on_conflict(
     return True
 
 
+def resolve_bmo_assignee(context: ReverseContext) -> Optional[str]:
+    """Resolve the issue's Jira assignee to a BMO email, or `None`.
+
+    Identity map first (the only source that can name someone whose Jira
+    email is hidden), then the email in the payload. `None` means "could not
+    resolve" -- never a guess.
+    """
+    fields = context.event.issue.fields if context.event.issue else None
+    assignee = fields.assignee if fields else None
+    if assignee is None or not assignee.accountId:
+        return None
+    return get_identity_map().bmo_email_for(assignee.accountId) or assignee.emailAddress
+
+
 def writeback_status(
     context: ReverseContext, *, bugzilla_service: BugzillaService
 ) -> ReverseStepResult:
@@ -263,7 +279,26 @@ def writeback_status(
         # otherwise BMO shows an open bug that still claims to be FIXED.
         resolution = "" if context.bug.resolution else None
 
-    response = bugzilla_service.set_status_resolution(context.bug, status, resolution)
+    # BMO rejects ASSIGNED on a bug with no assignee, so the assignee has to
+    # travel with the status. Confirmed against the dev instance: the same
+    # write 400s alone and succeeds when `assigned_to` is included.
+    assigned_to = None
+    if status == "ASSIGNED" and not context.bug.is_assigned():
+        assigned_to = resolve_bmo_assignee(context)
+        if not assigned_to:
+            logger.warning(
+                "Issue %s is in progress but Bug %s is unassigned and the "
+                "Jira assignee could not be resolved; BMO cannot represent "
+                "this state, so the status is left alone",
+                context.issue_key,
+                context.bug.id,
+                extra=context.model_dump(),
+            )
+            return (ReverseStepStatus.INCOMPLETE, context)
+
+    response = bugzilla_service.set_status_resolution(
+        context.bug, status, resolution, assigned_to=assigned_to
+    )
     if response is None:
         return (ReverseStepStatus.NOOP, context)
     return (ReverseStepStatus.SUCCESS, context.append_responses(response))
@@ -328,9 +363,7 @@ def writeback_assignee(
     else:
         # Tier 1: the override map. Tier 2: the email Jira gave us, when it
         # is not hidden. Tier 3: leave the assignee alone -- never guess.
-        email = get_identity_map().bmo_email_for(assignee.accountId)
-        if not email:
-            email = assignee.emailAddress
+        email = resolve_bmo_assignee(context)
         if not email:
             logger.info(
                 "Could not resolve Jira account %s to a BMO user; "
@@ -476,9 +509,31 @@ class ReverseExecutor:
 
         for step in REVERSE_STEPS:
             context = context.update(current_step=step.__name__)
-            status, context = step(
-                context=context, bugzilla_service=self.bugzilla_service
-            )
+            try:
+                status, context = step(
+                    context=context, bugzilla_service=self.bugzilla_service
+                )
+            except requests_exceptions.HTTPError as exc:
+                code = getattr(exc.response, "status_code", None)
+                if code is None or not (400 <= code < 500):
+                    # 5xx or a connection problem: a real outage, which the
+                    # caller should see rather than have swallowed.
+                    raise
+                # A 4xx means BMO rejected *this* write as invalid. Retrying
+                # will not help, and one rejected field must not discard the
+                # rest of the pipeline -- a failed status write should still
+                # let the comment through.
+                logger.warning(
+                    "Reverse step %s rejected by Bugzilla (HTTP %s) for "
+                    "issue %s / Bug %s; continuing with the remaining steps",
+                    step.__name__,
+                    code,
+                    context.issue_key,
+                    context.bug.id,
+                    extra=context.model_dump(),
+                )
+                results[step.__name__] = ReverseStepStatus.INCOMPLETE.name
+                continue
             results[step.__name__] = status.name
             logger.info(
                 "Reverse step %s -> %s for issue %s / Bug %s",

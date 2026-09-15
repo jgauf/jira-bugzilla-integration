@@ -64,15 +64,28 @@ class BugzillaService:
         return self.client.update_bug(bug.id, **pending)
 
     def set_status_resolution(
-        self, bug: Bug, status: Optional[str], resolution: Optional[str] = None
+        self,
+        bug: Bug,
+        status: Optional[str],
+        resolution: Optional[str] = None,
+        assigned_to: Optional[str] = None,
     ):
-        """Set the bug's status and (optionally) its resolution.
+        """Set the bug's status, and optionally its resolution and assignee.
 
-        Both travel in one request: BMO validates them together, and writing a
-        resolution without the matching status transition is rejected.
+        All three travel in one request because BMO validates them as a set:
+        a resolution without the matching status transition is rejected, and
+        `ASSIGNED` is rejected outright on a bug with no assignee
+        ("You cannot set this bug's status to ASSIGNED because the bug is not
+        assigned to a person"). Passing the assignee alongside satisfies that
+        in a single write rather than leaving the bug half-updated.
         """
         return self._update_bug_if_changed(
-            bug, {"status": status, "resolution": resolution}
+            bug,
+            {
+                "status": status,
+                "resolution": resolution,
+                "assigned_to": assigned_to,
+            },
         )
 
     def set_assignee(self, bug: Bug, email: Optional[str]):

@@ -41,9 +41,14 @@ def make_context(
         parameters__jira_inbound_enabled=True,
         **(action_kwargs or {}),
     )
+    # Default the bug to *assigned*: BMO refuses `status: ASSIGNED` on an
+    # unassigned bug, so an unassigned default would make most status tests
+    # exercise that edge case rather than the mapping they are about. Tests
+    # that care pass `assigned_to` explicitly.
+    bug_kwargs = {"assigned_to": "owner@mozilla.com", **(bug_kwargs or {})}
     return ReverseContext(
         action=action,
-        bug=bug_factory(**(bug_kwargs or {})),
+        bug=bug_factory(**bug_kwargs),
         issue_key="JBI-234",
         event=jira_webhook_request_factory(**event_kwargs),
     )
@@ -1081,3 +1086,150 @@ def test_category_override_can_still_force_a_new_category_write(
 
     assert status == ReverseStepStatus.SUCCESS
     assert mocked_bugzilla.update_bug.call_args.kwargs["status"] == "NEW"
+
+
+# --- BMO's ASSIGNED precondition (found against the dev instance) -----------
+
+
+def test_assigned_status_carries_the_assignee_for_an_unassigned_bug(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+    jira_user_factory,
+):
+    """BMO rejects `status: ASSIGNED` on a bug with no assignee ("you cannot
+    set this bug's status to ASSIGNED because the bug is not assigned to a
+    person"), so the assignee must travel in the same write."""
+    context = make_context(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        bug_kwargs={"status": "NEW", "resolution": "", "assigned_to": UNASSIGNED_EMAIL},
+        issue__fields__status__statusCategory__key="indeterminate",
+        issue__fields__assignee=jira_user_factory(
+            accountId="acc-1", emailAddress="person@mozilla.com"
+        ),
+    )
+
+    status, _ = jira_steps.writeback_status(context, bugzilla_service=mocked_service)
+
+    assert status == ReverseStepStatus.SUCCESS
+    mocked_bugzilla.update_bug.assert_called_once_with(
+        context.bug.id, status="ASSIGNED", assigned_to="person@mozilla.com"
+    )
+
+
+def test_assigned_status_is_skipped_when_nobody_can_be_resolved(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+    capturelogs,
+):
+    """BMO cannot represent "in progress but unassigned", and inventing an
+    assignee would be worse than leaving the status alone."""
+    import logging
+
+    context = make_context(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        bug_kwargs={"status": "NEW", "resolution": "", "assigned_to": UNASSIGNED_EMAIL},
+        issue__fields__status__statusCategory__key="indeterminate",
+        issue__fields__assignee=None,
+    )
+
+    with capturelogs.for_logger("jbi.jira_steps").at_level(logging.WARNING):
+        status, _ = jira_steps.writeback_status(
+            context, bugzilla_service=mocked_service
+        )
+
+    assert status == ReverseStepStatus.INCOMPLETE
+    assert not mocked_bugzilla.update_bug.called
+    assert any("unassigned" in r.message for r in capturelogs.records)
+
+
+def test_assigned_status_leaves_an_existing_assignee_alone(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+    jira_user_factory,
+):
+    """The assignee only rides along when BMO requires it; it must not
+    silently reassign a bug that already has an owner."""
+    context = make_context(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        bug_kwargs={
+            "status": "NEW",
+            "resolution": "",
+            "assigned_to": "owner@mozilla.com",
+        },
+        issue__fields__status__statusCategory__key="indeterminate",
+        issue__fields__assignee=jira_user_factory(
+            accountId="acc-2", emailAddress="someone-else@mozilla.com"
+        ),
+    )
+
+    jira_steps.writeback_status(context, bugzilla_service=mocked_service)
+
+    mocked_bugzilla.update_bug.assert_called_once_with(
+        context.bug.id, status="ASSIGNED"
+    )
+
+
+# --- A rejected write must not discard the rest of the pipeline -------------
+
+
+def _raising_step(status_code):
+    import requests
+
+    def step(context, *, bugzilla_service):
+        response = mock.MagicMock(status_code=status_code)
+        raise requests.HTTPError("nope", response=response)
+
+    step.__name__ = f"raising_{status_code}"
+    return step
+
+
+def test_client_error_fails_one_step_and_continues(
+    action_factory, bug_factory, jira_webhook_request_factory, mocked_service
+):
+    """A 4xx means BMO rejected *that* write as invalid; retrying will not
+    help, and a rejected status must still let the comment through."""
+    recorded = []
+
+    def recording_step(context, *, bugzilla_service):
+        recorded.append(context.issue_key)
+        return (ReverseStepStatus.SUCCESS, context)
+
+    recording_step.__name__ = "recording_step"
+    context = make_context(action_factory, bug_factory, jira_webhook_request_factory)
+
+    with mock.patch.object(
+        jira_steps, "REVERSE_STEPS", [_raising_step(400), recording_step]
+    ):
+        details = jira_steps.ReverseExecutor(bugzilla_service=mocked_service)(context)
+
+    assert details["steps"]["raising_400"] == "INCOMPLETE"
+    assert details["steps"]["recording_step"] == "SUCCESS"
+    assert recorded == ["JBI-234"]
+
+
+def test_server_error_is_not_swallowed(
+    action_factory, bug_factory, jira_webhook_request_factory, mocked_service
+):
+    """A 5xx is an outage, not an invalid write: the caller must see it."""
+    import requests
+
+    context = make_context(action_factory, bug_factory, jira_webhook_request_factory)
+
+    with mock.patch.object(jira_steps, "REVERSE_STEPS", [_raising_step(503)]):
+        with pytest.raises(requests.HTTPError):
+            jira_steps.ReverseExecutor(bugzilla_service=mocked_service)(context)

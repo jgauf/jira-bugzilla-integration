@@ -150,6 +150,10 @@ def test_invariant_c_round_trip_terminates(
         whiteboard="[devtest]",
         status="NEW",
         resolution="",
+        # Assigned, because BMO rejects `status: ASSIGNED` on an unassigned
+        # bug -- otherwise leg 1 would write nothing and the loop test would
+        # pass for the wrong reason.
+        assigned_to="owner@mozilla.com",
         see_also=[f"{settings.jira_base_url}browse/JBI-234"],
     )
     mocked_jira.get_issue_remote_links.return_value = [{"globalId": "654321"}]
