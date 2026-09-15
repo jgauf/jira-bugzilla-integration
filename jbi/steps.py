@@ -20,6 +20,7 @@ from requests import exceptions as requests_exceptions
 from jbi import Operation
 from jbi.bugzilla.models import JIRA_HOSTNAMES, WebhookAttachment
 from jbi.environment import get_settings
+from jbi.hierarchy import ensure_mirror_epic, is_metabug, resolve_metabugs
 from jbi.identity import get_identity_map
 
 
@@ -313,6 +314,68 @@ def sync_phabricator_review_state(
     resp = jira_service.update_issue_status(context, target_status)
     context = context.append_responses(resp)
     return (StepStatus.SUCCESS, context)
+
+
+def maybe_seed_epic_parent(
+    context: ActionContext,
+    *,
+    parameters: ActionParams,
+    jira_service: JiraService,
+    bugzilla_service: BugzillaService,
+) -> StepResult:
+    """Parent a newly created issue under its metabug's mirror Epic (R-06).
+
+    Seeded **once, at creation only.** Thereafter the parent is a planning
+    decision Jira owns: humans re-organize freely and JBI never re-parents
+    from BMO (R-07). Membership itself is not expressed here -- the full
+    many-to-many graph is already mirrored as issue links by
+    `sync_dependencies`, so this step only chooses the single parent.
+    """
+    if not parameters.metabug_epics_enabled:
+        return (StepStatus.NOOP, context)
+
+    if context.operation != Operation.CREATE:
+        # UPDATE must never re-parent: see R-07.
+        return (StepStatus.NOOP, context)
+
+    issue_key = context.jira.issue
+    if not issue_key:
+        return (StepStatus.NOOP, context)
+
+    if is_metabug(context.bug):
+        # A metabug's own mirror is an Epic; Epics are not parented here.
+        return (StepStatus.NOOP, context)
+
+    metabugs = resolve_metabugs(context.bug, parameters, bugzilla_service)
+    if not metabugs:
+        return (StepStatus.NOOP, context)
+
+    # Walk the metabugs in id order and take the first that yields an Epic.
+    # A metabug already mirrored as a non-Epic (the rollout case) is skipped
+    # rather than converted, so the next candidate gets the chance.
+    for metabug in metabugs:
+        epic_key = ensure_mirror_epic(context, metabug, jira_service, bugzilla_service)
+        if not epic_key:
+            continue
+
+        resp = jira_service.set_issue_parent(context, issue_key, epic_key)
+        logger.info(
+            "Seeded parent of %s as %s (metabug %s of %s candidates)",
+            issue_key,
+            epic_key,
+            metabug.id,
+            len(metabugs),
+            extra=context.model_dump(),
+        )
+        context = context.append_responses(resp)
+        return (StepStatus.SUCCESS, context)
+
+    logger.info(
+        "No metabug of Bug %s has an Epic mirror; leaving the issue unparented",
+        context.bug.id,
+        extra=context.model_dump(),
+    )
+    return (StepStatus.INCOMPLETE, context)
 
 
 def maybe_delete_duplicate(
