@@ -380,6 +380,16 @@ class JiraService:
         issue_key = context.jira.issue
         assert issue_key  # Until we have more fine-grained typing of contexts
 
+        current_status = self.client.get_issue_status(issue_key)
+        if current_status == jira_status:
+            logger.info(
+                "Jira issue %s is already in status %s, skipping",
+                issue_key,
+                jira_status,
+                extra=context.model_dump(),
+            )
+            return None
+
         kwargs: dict[str, Any] = {}
         if jira_status == "Cancelled":
             # Check if resolution field is available on the transition screen
@@ -1033,6 +1043,12 @@ def get_service():
         username=settings.jira_username,
         password=settings.jira_api_key,  # package calls this param 'password' but actually expects an api key
         cloud=True,  # we run against an instance of Jira cloud
+        # Keep this well under the load balancer's ~30s request budget (the
+        # library default is 75s): a slow Jira call must fail fast enough
+        # for the webhook handler to still return a response, so the event
+        # is parked in the dead letter queue and retried later instead of
+        # stalling Bugzilla's in-order delivery queue.
+        timeout=10,
     )
 
     return JiraService(client=client)
