@@ -244,9 +244,7 @@ def test_update_issue_status_skips_transition_when_already_in_target_status(
     )
 
     with capturelogs.for_logger("jbi.jira.service").at_level(logging.DEBUG):
-        response = jira_service.update_issue_status(
-            context=context, jira_status="Live"
-        )
+        response = jira_service.update_issue_status(context=context, jira_status="Live")
 
     assert response is None
     assert len(mocked_responses.calls) == 1  # only the status GET, no transitions POST

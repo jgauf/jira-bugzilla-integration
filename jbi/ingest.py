@@ -21,6 +21,7 @@ from enum import StrEnum, auto
 from typing import Optional, Union
 
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from jbi.bugzilla import models as bugzilla_models
 from jbi.errors import IgnoreInvalidRequestError
@@ -139,7 +140,7 @@ async def ingest_event(
 
     if event.source == EventSource.BUGZILLA:
         return await _ingest_bugzilla(event, actions, queue)
-    return _ingest_jira(event, actions)
+    return await _ingest_jira(event, actions)
 
 
 async def _ingest_bugzilla(
@@ -168,7 +169,11 @@ async def _ingest_bugzilla(
         return IngestResult(outcome=IngestOutcome.HANDLED, details=response)
 
     try:
-        details = execute_action(payload, actions)
+        # Blocking I/O (Bugzilla/Jira HTTP, pandoc) must not run on the event
+        # loop: this process has a single loop and no other workers, so a slow
+        # event would freeze the pod including its own health check. Same
+        # reasoning as `execute_or_queue`.
+        details = await run_in_threadpool(execute_action, payload, actions)
     except IgnoreInvalidRequestError as exc:
         return IngestResult(outcome=IngestOutcome.IGNORED, reason=str(exc))
     except Exception as exc:
@@ -181,12 +186,14 @@ async def _ingest_bugzilla(
     return IngestResult(outcome=IngestOutcome.HANDLED, details=details)
 
 
-def _ingest_jira(event: InboundEvent, actions: Actions) -> IngestResult:
+async def _ingest_jira(event: InboundEvent, actions: Actions) -> IngestResult:
     payload = event.payload
     assert isinstance(payload, JiraWebhookRequest)
 
     try:
-        details = execute_jira_event(payload, actions)
+        # Threadpool for the same reason as the forward path: the reverse
+        # pipeline makes several blocking Jira and Bugzilla calls per event.
+        details = await run_in_threadpool(execute_jira_event, payload, actions)
     except IgnoreInvalidRequestError as exc:
         return IngestResult(outcome=IngestOutcome.IGNORED, reason=str(exc))
     except Exception as exc:
