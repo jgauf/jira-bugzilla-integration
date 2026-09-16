@@ -22,6 +22,7 @@ from jbi.environment import Settings, get_settings
 from jbi.ingest import EventSource, InboundEvent, IngestOutcome, ingest_event
 from jbi.jira_inbound import models as jira_inbound_models
 from jbi.models import Actions
+from jbi.pubsub import PubSubPushRequest, UndecodableMessage, build_inbound_event
 from jbi.queue import DeadLetterQueue, get_dl_queue
 
 SettingsDep = Annotated[Settings, Depends(get_settings)]
@@ -68,6 +69,70 @@ def api_key_auth(
             detail="Incorrect API Key",
             headers={"WWW-Authenticate": "Basic"},
         )
+
+
+def pubsub_auth(
+    settings: SettingsDep,
+    api_key: Annotated[str, Depends(header_scheme)],
+    token: Optional[str] = None,
+):
+    """Authenticate a Pub/Sub push delivery.
+
+    A push subscription cannot set arbitrary request headers, so the shared
+    secret is accepted as a `?token=` query parameter as well as the usual
+    `X-Api-Key` header. Both are compared in constant time.
+
+    For production, Pub/Sub OIDC push authentication is stronger than a shared
+    secret and needs no query string -- recorded as follow-up rather than
+    silently assumed (see ADR 005).
+    """
+    presented = api_key or token or ""
+    if not presented or not secrets.compare_digest(presented, settings.jbi_api_key):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect API Key",
+        )
+
+
+@router.post(
+    "/pubsub_push",
+    dependencies=[Depends(pubsub_auth)],
+)
+async def pubsub_push(
+    actions: ActionsDep,
+    push: PubSubPushRequest = Body(..., embed=False),
+):
+    """Receive one Pub/Sub push delivery.
+
+    The HTTP status *is* the acknowledgement: 2xx acks the message, anything
+    else asks the subscription to redeliver. So events JBI deliberately
+    ignores, and payloads it can never process, both return 200 -- redelivery
+    would fail identically and eventually expire.
+
+    No dead-letter queue is passed: the subscription owns retries, and
+    stacking JBI's queue on top would multiply redeliveries.
+    """
+    try:
+        event = build_inbound_event(push, rid=request_id_context.get())
+    except UndecodableMessage as exc:
+        logger.error(
+            "Dropping undecodable Pub/Sub message %s: %s",
+            push.message.messageId,
+            exc,
+        )
+        return {"status": "dropped", "reason": str(exc)}
+
+    result = await ingest_event(event, actions)
+
+    if result.outcome == IngestOutcome.RETRY:
+        # 5xx is how a push subscription is told to redeliver.
+        raise HTTPException(status_code=503, detail=result.reason)
+
+    return {
+        "status": str(result.outcome),
+        "reason": result.reason,
+        "message_id": push.message.messageId,
+    }
 
 
 @router.post(
