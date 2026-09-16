@@ -1,7 +1,13 @@
 # Extend JBI for Bidirectional BMO <-> Jira Sync (vs. Building Elsewhere)
 
-- Status: Accepted
+- Status: Accepted (transport superseded by ADR 005)
 - Date: 2026-08-25
+
+> **Amended 2026-09-16.** The decision to extend JBI rather than build the
+> reverse path elsewhere stands. The *transport* described below -- events
+> arriving directly over HTTP -- is superseded by
+> [ADR 005](005-pubsub-transport.md): both Bugzilla and Jira events now
+> arrive via Pub/Sub push, behind a single ingest seam.
 
 Tracking issue: (see `docs/bmo-jira-bidirectional-integration-plan.md`, based on
 the "BMO - Jira Integration" PRD, DRAFT v2)
