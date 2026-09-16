@@ -91,6 +91,10 @@ class JiraIssueFields(LenientModel):
     project: Optional[JiraProject] = None
     # Set when the issue carries an issue security level (embargoed work).
     security: Optional[JiraSecurityLevel] = None
+    # `None` means the payload did not carry labels at all, which is different
+    # from "no labels" -- the stop-label check has to fetch them in that case
+    # rather than assume the issue is unlabelled.
+    labels: Optional[list[str]] = None
 
 
 class JiraIssue(LenientModel):

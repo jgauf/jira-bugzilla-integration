@@ -31,6 +31,7 @@ from jbi.jira_inbound.models import JiraWebhookRequest
 from jbi.jira_steps import ReverseContext, ReverseExecutor
 from jbi.models import Action, Actions
 from jbi.visibility import bug_restriction_reason
+from jbi.writeback import sync_is_stopped
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,19 @@ def execute_jira_event(event: JiraWebhookRequest, actions: Actions) -> dict:
             f"no action with `jira_inbound_enabled` for bug {bug_id} "
             f"in project {project_key}"
         )
+
+    # Same label, same meaning, other direction. Labels come from the payload
+    # when the rule sends them, and are fetched otherwise -- an absent
+    # `labels` key must not read as "no stop label".
+    stop_label = action.parameters.sync_stop_label
+    if stop_label:
+        fields = issue.fields if issue else None
+        labels = fields.labels if fields and fields.labels is not None else None
+        if labels is None:
+            labels = jira.get_service().get_issue_labels(None, issue_key)
+        if sync_is_stopped(labels, stop_label):
+            statsd.incr("jbi.sync_stopped.count")
+            raise _ignore(f"sync stopped by the {stop_label!r} label on {issue_key}")
 
     context = ReverseContext(
         action=action,

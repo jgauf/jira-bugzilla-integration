@@ -89,3 +89,26 @@ def bmo_wins_conflict(
     if jira_previous_value is None:
         return False
     return (jira_previous_value or "").strip() != (bmo_current_value or "").strip()
+
+
+# --- The sync-stop label ----------------------------------------------------
+
+
+def sync_is_stopped(labels: Iterable[Optional[str]], stop_label: Optional[str]) -> bool:
+    """Return True when a Jira issue carries the configured stop label.
+
+    A deliberate human override: someone has decided this pair should stop
+    syncing, and that decision outranks every other rule here. It halts both
+    directions, because "stop syncing this" is what a user means by it, and a
+    label that stopped only one direction would be a trap.
+
+    Removing the label resumes syncing from the *current* state -- changes
+    made while stopped are not replayed, since nothing records them.
+
+    Comparison is case-insensitive: Jira preserves label case, and a user
+    typing `JBI-Sync-Stop` plainly means the same thing.
+    """
+    if not stop_label:
+        return False
+    wanted = stop_label.strip().lower()
+    return any(str(label).strip().lower() == wanted for label in labels if label)

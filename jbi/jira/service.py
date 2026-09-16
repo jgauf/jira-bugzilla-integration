@@ -531,17 +531,33 @@ class JiraService:
         return resp, missing_components
 
     def get_issue_labels(
-        self, context: ActionContext, issue_key: Optional[str]
+        self, context: Optional[ActionContext], issue_key: Optional[str]
     ) -> list[str]:
         """Return an issue's current labels, or `[]` if unreadable.
 
-        Needed to retire labels in a JBI-owned namespace: a release flag
-        moving from `affected` to `fixed` has to remove the old label, and the
-        old value is not derivable from the bug's current state.
+        Needed in two places: to retire labels in a JBI-owned namespace (a
+        release flag moving from `affected` to `fixed` has to remove the old
+        label, and the old value is not derivable from the bug's current
+        state), and to check the sync-stop label on the reverse path.
+
+        `context` may be `None` for callers outside a forward action -- the
+        inbound path has a `ReverseContext`, not an `ActionContext` -- in
+        which case the issue is fetched without the action logging context.
         """
         if not issue_key:
             return []
-        issue = self.get_issue(context, issue_key)
+
+        if context is None:
+            try:
+                issue = self.client.get_issue(issue_key, fields="labels")
+            except requests_exceptions.HTTPError as exc:
+                if getattr(exc.response, "status_code", None) != 404:
+                    raise
+                logger.error("Could not read labels of issue %s", issue_key)
+                return []
+        else:
+            issue = self.get_issue(context, issue_key)
+
         if not issue:
             return []
         labels = issue.get("fields", {}).get("labels") or []

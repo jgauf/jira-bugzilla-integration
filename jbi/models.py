@@ -162,6 +162,11 @@ class ActionParams(BaseModel, frozen=True):
     reverse_status_overrides: dict[str, str] = {}
     default_reverse_resolution: Optional[str] = None
 
+    # An escape hatch for humans: adding this label to a Jira issue halts
+    # syncing for that bug/issue pair in BOTH directions, and removing it
+    # resumes. Unset means the feature is off for this action.
+    sync_stop_label: Optional[str] = None
+
     # R-05/R-06: mirror BMO metabugs as Jira Epics and seed the parent of
     # newly created issues. Off by default; Phase 2.
     metabug_epics_enabled: bool = False

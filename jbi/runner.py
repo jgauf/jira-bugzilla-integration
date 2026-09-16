@@ -31,6 +31,7 @@ from jbi.queue import DeadLetterQueue
 from jbi.scope import bug_in_scope
 from jbi.steps import StepStatus
 from jbi.visibility import bug_restriction_reason
+from jbi.writeback import sync_is_stopped
 
 logger = logging.getLogger(__name__)
 
@@ -434,6 +435,26 @@ def do_execute_actions(
                 raise IgnoreInvalidRequestError(
                     f"ignore unreadable issue {action_context.jira.issue}"
                 )
+
+            # The stop label lives on the Jira issue, and that issue has just
+            # been fetched for the project check below -- so this costs no
+            # extra API call.
+            if sync_is_stopped(
+                jira_issue["fields"].get("labels") or [],
+                action.parameters.sync_stop_label,
+            ):
+                logger.info(
+                    "Sync stopped by the %r label on %s; skipping action %r for Bug %s",
+                    action.parameters.sync_stop_label,
+                    action_context.jira.issue,
+                    action.whiteboard_tag,
+                    bug.id,
+                    extra=action_context.update(
+                        operation=Operation.IGNORE
+                    ).model_dump(),
+                )
+                statsd.incr("jbi.sync_stopped.count")
+                continue
 
             # Make sure that associated project in configuration matches the
             # project of the linked Jira issue (see #635)
