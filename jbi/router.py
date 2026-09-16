@@ -22,7 +22,6 @@ from jbi.environment import Settings, get_settings
 from jbi.ingest import EventSource, InboundEvent, IngestOutcome, ingest_event
 from jbi.jira_inbound import models as jira_inbound_models
 from jbi.models import Actions
-from jbi.pubsub import PubSubPushRequest, UndecodableMessage, build_inbound_event
 from jbi.queue import DeadLetterQueue, get_dl_queue
 
 SettingsDep = Annotated[Settings, Depends(get_settings)]
@@ -64,11 +63,10 @@ def api_key_auth(
 ):
     """Authenticate a request by header, basic auth, or `?token=`.
 
-    The query-string form exists because some producers cannot set request
-    headers at all -- a Bugzilla webhook takes only a URL, and a Pub/Sub push
-    subscription signs requests rather than letting you add headers. It is
-    the weakest of the three (a URL can reach access logs and browser
-    history), so prefer the header wherever the producer supports it.
+    The query-string form exists because a Bugzilla webhook takes only a URL
+    and cannot send headers. It is the weakest of the three (a URL can reach
+    access logs and browser history), so prefer the header wherever the
+    producer supports it -- Jira Automation does.
     """
     if not api_key and basic_auth:
         api_key = basic_auth.password
@@ -80,50 +78,6 @@ def api_key_auth(
             detail="Incorrect API Key",
             headers={"WWW-Authenticate": "Basic"},
         )
-
-
-@router.post(
-    "/pubsub_push",
-    # Same auth as every other endpoint; a push subscription cannot set
-    # headers, so it uses the `?token=` form. Pub/Sub OIDC push auth is the
-    # stronger production answer -- see ADR 005.
-    dependencies=[Depends(api_key_auth)],
-)
-async def pubsub_push(
-    actions: ActionsDep,
-    push: PubSubPushRequest = Body(..., embed=False),
-):
-    """Receive one Pub/Sub push delivery.
-
-    The HTTP status *is* the acknowledgement: 2xx acks the message, anything
-    else asks the subscription to redeliver. So events JBI deliberately
-    ignores, and payloads it can never process, both return 200 -- redelivery
-    would fail identically and eventually expire.
-
-    No dead-letter queue is passed: the subscription owns retries, and
-    stacking JBI's queue on top would multiply redeliveries.
-    """
-    try:
-        event = build_inbound_event(push, rid=request_id_context.get())
-    except UndecodableMessage as exc:
-        logger.error(
-            "Dropping undecodable Pub/Sub message %s: %s",
-            push.message.messageId,
-            exc,
-        )
-        return {"status": "dropped", "reason": str(exc)}
-
-    result = await ingest_event(event, actions)
-
-    if result.outcome == IngestOutcome.RETRY:
-        # 5xx is how a push subscription is told to redeliver.
-        raise HTTPException(status_code=503, detail=result.reason)
-
-    return {
-        "status": str(result.outcome),
-        "reason": result.reason,
-        "message_id": push.message.messageId,
-    }
 
 
 @router.post(
