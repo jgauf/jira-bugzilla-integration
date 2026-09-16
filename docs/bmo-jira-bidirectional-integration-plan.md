@@ -7,9 +7,10 @@
 > **Audience:** Reviewers and implementers. This document does not itself change
 > behavior; it is the design and traceability reference the implementation PRs
 > will point back to.
-> **Revision:** v3 — incorporates review feedback on PR #1386 (scalability of
-> the inbound Automation rule, reversibility of `status_map`, and one-sided
-> loop prevention). See "Review feedback — what changed in v3" below.
+> **Revision:** v4 — the inbound transport is now **Pub/Sub push**, not a
+> direct Jira Automation web request, and a Jira label can halt syncing for a
+> pair. See "What changed in v4". v3 incorporated the PR #1386 review
+> feedback, indexed in "Review feedback — what changed in v3".
 
 ---
 
@@ -27,6 +28,17 @@ change.
 
 ---
 
+## 0.1 What changed in v4
+
+Requested by the repo admin, and implemented before Phase 2 continues.
+
+| Change | Why it matters here |
+|---|---|
+| **Transport is Pub/Sub push**, for *both* Bugzilla and Jira events, replacing the direct Automation web request and the BMO webhook as the primary path. | Supersedes the §1 "Push over polling" decision and rewrites §7 and §12. Retries, backoff and dead-lettering become subscription configuration; the broker's dead-letter topic replaces the file-based dead-letter queue, which resolves two v3 limitations (the queue could not hold Jira events, and it assumed a single instance). |
+| **One ingest seam** (`jbi/ingest.py`) that every transport calls. | Each transport previously wired itself into the core differently. The seam returns an *acknowledgement decision*, which HTTP never needed but a broker requires. |
+| **Duplicate suppression** on the broker message id. | At-least-once delivery makes duplicates normal. Most of the pipeline is idempotent already, but a redelivered comment event would post twice. |
+| **A sync-stop label** halts a pair in both directions (new Invariant E). | Gives humans an escape hatch that outranks every other rule, without a deploy or a config change. |
+
 ## 1. Decisions locked
 
 These decisions were settled with stakeholders and constrain everything below.
@@ -35,8 +47,11 @@ rather than infer it.
 
 | Area | Decision |
 |---|---|
-| Inbound Jira path | **Push** via **one centrally-owned, multi-project** Jira Automation "Send web request" rule, scoped by JQL, → a new `POST /jira_webhook` endpoint. Per-project rules are explicitly rejected as unscalable (§12). Polling is a documented fallback only. |
+| Transport (v4) | **Pub/Sub push** for both Bugzilla and Jira events → `POST /pubsub_push`. The service stays stateless: no consumer process, and retry/backoff/dead-letter are subscription config. The Automation rule still *originates* Jira events but publishes to a topic rather than calling JBI directly; `/jira_webhook` and `/bugzilla_webhook` remain for compatibility and local testing. |
+| Event injection (v4) | **One seam**, `jbi.ingest.ingest_event(InboundEvent) -> IngestResult`, called by every transport. Its outcome (`HANDLED`/`IGNORED`/`RETRY`/`PERMANENT_FAILURE`) is the ack decision; `IGNORED` **acks**, because an event JBI does not act on is normal traffic. |
+| Inbound Jira rule | **One centrally-owned, multi-project** Automation rule scoped by JQL (not one per project — see §12), now publishing to the topic. |
 | Reverse status/resolution | **Never invert `status_map`** — it is many-to-one. Reverse *status* is derived from Jira's `statusCategory`; reverse *resolution* from the inverted per-action `resolution_map`. (§4.1) |
+| Sync stop (v4) | **A Jira label** (`sync_stop_label`, per action, default unset) halts the pair in **both** directions; removing it resumes from the current state, with no replay of what was missed. (Invariant E) |
 | Loop prevention | **Symmetric by design.** Both inbound paths drop events authored by JBI's own account — Jira `accountId` inbound, `WebhookEvent.user.login` on the Bugzilla side — backed by read-before-write idempotency. (Invariant C) |
 | State store | **No new datastore in Phase 1.** Correlation reuses the existing `see_also`/remote-link; identity lives in YAML; loop-prevention is stateless. Redis is considered only if multi-instance ephemeral state later proves necessary. |
 | Conflict policy | **BMO wins for execution fields; Jira wins for planning-only fields.** (Defined in §4.) |
@@ -57,6 +72,14 @@ rather than infer it.
   covers 35 Jira projects, so a per-project rule would mean 35 hand-built,
   independently-drifting copies owned by 35 different project admins. One rule
   scoped by JQL keeps onboarding, auditing, and revocation in one place (§12).
+- **Pub/Sub push over a direct web request** because the broker already
+  solves what we would otherwise hand-roll: retry with backoff, dead-lettering,
+  and a buffer when JBI is down. Push rather than pull keeps JBI a stateless
+  web service — no consumer process, no second deployment unit, no graceful
+  shutdown logic — and makes the delivery policy reviewable configuration
+  instead of code. The cost is that acknowledgement is expressed as an HTTP
+  status, so "ignored" must return 200; an error there would redeliver an
+  out-of-scope event until it expired.
 - **Symmetric loop prevention** because a write is a write in both systems: a
   reverse write into BMO fires BMO's normal webhook and re-enters the forward
   pipeline exactly like a human edit would. Suppressing echoes on only the Jira
@@ -182,6 +205,22 @@ other never intended. The rule is symmetric and fails *closed*.
 - *Scope:* the guard covers free text, not enumerated values. A status or
   priority carries no embargoed detail, and blocking it would silently strand
   a bug's state.
+
+**Invariant E — a human's stop label outranks everything.**
+A configured label on the Jira issue (`sync_stop_label`) halts syncing for
+that bug/issue pair in **both** directions, and removing it resumes. It is
+checked before any write in either direction, so it overrides scope,
+thresholds, field ownership and conflict policy alike.
+
+- *Both directions*, because that is what a user means by "stop syncing this";
+  a label that silently stopped only one direction would be a trap.
+- *No replay on resume.* Syncing picks up from the current state; changes made
+  while stopped are not reapplied, because nothing records them. A user who
+  needs the intervening history has it in both systems' own change logs.
+- *Creation is unaffected*: an unlinked bug has no Jira issue to carry a
+  label, so the escape hatch exists only once a pair exists.
+- *Cost*: none on the forward path. The linked Jira issue is already fetched
+  for the project check, so its labels come back in that same call.
 
 **Consequence — the two directions are deliberately asymmetric.**
 BMO→Jira may CREATE-or-UPDATE; Jira→BMO is UPDATE-only. Beyond enforcing
@@ -436,6 +475,25 @@ JBI's own service account (loop-prevention), resolves identities and enforces
 visibility, and applies the write-back denylist (§4).
 
 ```
+                    v4 transport: both sources publish to one topic
+Bugzilla --event--> [ Pub/Sub topic ] <--event-- Jira Automation (central, JQL-scoped)
+                            |
+                     push subscription
+                            v
+                    POST /pubsub_push  (HTTP status == ack)
+                            |
+                     jbi.ingest.ingest_event(InboundEvent) -> IngestResult
+                            |            (dedupe on message_id)
+              +-------------+-------------+
+              |                           |
+        source=bugzilla             source=jira
+              |                           |
+              v                           v
+        (forward pipeline)          (reverse pipeline)
+
+The two pipelines themselves are unchanged from v3, and the direct HTTP
+endpoints remain for compatibility and local testing:
+
 Bugzilla --POST /bugzilla_webhook--> [echo gate] --> execute_or_queue --> Executor --> steps.py --> Jira
    ^                                     ^                |                                  |
    |                        (NEW: drop if event.user.login  DeadLetterQueue           (otherwise unchanged)
@@ -453,7 +511,17 @@ The two `[echo gate]`s are the same rule applied at both entry points, which is
 what makes Invariant C hold: neither system's copy of a value can re-enter the
 pipeline that produced it.
 
-**New modules** — kept as new files so the diff is legible and the forward path is
+**New modules (v4)**
+- `jbi/ingest.py` — the one seam every transport calls, plus duplicate
+  suppression keyed on the broker message id. The suppression cache is
+  bounded and **in-process**: adequate for the redelivery bursts a broker
+  produces, explicitly not a distributed guarantee. A shared store is the
+  real answer and is deferred rather than half-built (§13-12).
+- `jbi/pubsub.py` — envelope decoding, source detection (`source` attribute
+  first, payload shape as fallback), and the `/pubsub_push` endpoint's
+  permanent-vs-transient distinction.
+
+**New modules (v3)** — kept as new files so the diff is legible and the forward path is
 untouched:
 - `jbi/jira_inbound/` — the Jira event model and the `/jira_webhook` endpoint.
 - `jbi/jira_steps.py` — the reverse step functions (the Jira→BMO equivalents of
@@ -503,6 +571,9 @@ codebase, and the specific files/functions a PR will touch. Verdicts:
 | **R-11** identity matching | ❌ | `jbi/identity.py` + `config/identity_map.{env}.yaml` + `bin/seed_identity_map.py` (§5). |
 | **R-12** visibility on write-back | ❌ | `jbi/visibility.py`: `bug_restriction_reason` (BMO `groups`/`is_private`, used by *both* directions) + `can_copy_jira_text_to_bug` (Jira `comment.visibility`, `jsdPublic`, `fields.security`). Forward path also drops private comments/attachments. Gated by `reverse_comment_sync_enabled`, default off. See Invariant D. |
 | **R-13** reconciliation report | ❌ | `jbi/reconcile.py` standalone job (retry.py pattern). |
+| **T-01** transport-agnostic ingestion (v4) | ✅ done | `jbi/ingest.py`: `InboundEvent` envelope, `IngestResult` ack decision, message-id dedupe. Every transport converges here. |
+| **T-02** Pub/Sub push delivery (v4) | ✅ done | `jbi/pubsub.py` + `POST /pubsub_push`. Ack via HTTP status; undecodable payloads dropped with 200; 503 only for transient failures. |
+| **T-03** sync-stop label (v4) | ✅ done | `writeback.sync_is_stopped`, gated in `runner.do_execute_actions` (forward) and `jira_inbound.handler` (reverse). Invariant E. |
 
 ---
 
@@ -674,8 +745,37 @@ resulting BMO webhook produces zero further Jira writes — the full round trip
 terminates). ·
 *Acceptance:* all four PRD §8 scenarios green. · *Depends:* D9–D11.
 
+**D13 — Ingest seam (v4).**
+*Accomplishes:* one entry point into the core for every transport, returning
+an acknowledgement decision rather than just a result. · *Files:*
+`jbi/ingest.py`; `router.py` routed through it. · *Tests:*
+`test_ingest.py` — IGNORED acks; an unexpected failure asks for redelivery;
+the webhook transport still uses the dead-letter queue while a broker
+transport does not; duplicate message ids do no work twice; the dedupe cache's
+eviction bound is asserted, not assumed. · *Acceptance:* existing webhook
+behavior unchanged. · *Depends:* —
+
+**D14 — Pub/Sub push (v4).**
+*Accomplishes:* both sources delivered through the broker, with retry and
+dead-lettering owned by the subscription. · *Files:* `jbi/pubsub.py`,
+`router.py` (`POST /pubsub_push`, token-or-header auth). · *Tests:*
+`test_pubsub.py` — base64/JSON/schema failures are permanent and ack;
+`source` attribute beats shape sniffing; an unknown source is dropped
+loudly; ignored events return 200; transient failures return 503; a Bugzilla
+event reaches the forward pipeline through the broker. · *Acceptance:* an
+out-of-scope event is never redelivered. · *Depends:* D13.
+
+**D15 — Sync-stop label (v4).**
+*Accomplishes:* a human escape hatch that needs no deploy. · *Files:*
+`models.py` (`sync_stop_label`), `writeback.py`, `runner.py`,
+`jira_inbound/handler.py`, `jira_inbound/models.py` (`labels`). · *Tests:*
+`test_sync_stop.py` — both directions stopped; removal resumes; case- and
+whitespace-insensitive; creation unaffected; an absent `labels` key triggers
+a fetch rather than reading as "no labels"; an action without the label
+configured is untouched. · *Acceptance:* **Invariant E.** · *Depends:* —
+
 **Dependency graph:** D1 → {D2, D3, D4→D5, D6, D6b, D8}; D7 standalone;
-{D6, D6b, D7, D8} → D9 & D10 → D11 → D12.
+{D6, D6b, D7, D8} → D9 & D10 → D11 → D12. D13 → D14; D15 standalone.
 
 ---
 
@@ -820,6 +920,35 @@ its bug via the existing link.
 - Ensure the fields the steps write (status transitions, priority, severity/points
   custom fields, components) exist on the create/update screens.
 
+**Pub/Sub — the transport (v4).** One topic carries both sources; JBI reads
+one push subscription.
+- **Topic** with both publishers: the Bugzilla side (a relay, or BMO itself if
+  it can publish) and the Jira Automation rule.
+- **Push subscription** → `POST https://<jbi-host>/pubsub_push`. The endpoint
+  accepts the shared secret as `?token=` because a push subscription cannot
+  set request headers; **Pub/Sub OIDC push auth is the stronger production
+  option** and is recorded as follow-up (ADR 005), not assumed here.
+- **Retry policy**: exponential backoff, and a **dead-letter topic** with a
+  max-delivery-attempts limit. This replaces JBI's file-based dead-letter
+  queue for broker-delivered events, and resolves two v3 limitations — the
+  queue could not hold Jira events, and it assumed a single instance.
+- **Ordering**: enable an ordering key of the **bug id** if available.
+  Without it, a status change and a comment on the same bug can arrive out of
+  order. Not fatal (each write is independent and idempotent) but it makes
+  the reverse conflict rule less reliable, since "the previous value" assumes
+  events arrive in sequence.
+- **Message attributes**: publishers should set `source` to `bugzilla` or
+  `jira`. JBI falls back to payload-shape detection, but an explicit
+  attribute is what keeps a future third payload shape from being guessed at.
+- IAM: JBI's service account needs only the subscription's push target to be
+  reachable; it does not need Pub/Sub API permissions at all in push mode.
+
+**The sync-stop label (v4).**
+- Choose one label name per action (`sync_stop_label`, eg. `jbi-sync-stop`)
+  and **document it wherever the team is told how JBI works** — an escape
+  hatch nobody knows about is not an escape hatch.
+- It is unset by default, so no project has it until configured.
+
 **Jira — new for bidirectional (this project):**
 
 - **One centrally-owned, multi-project Automation rule** — *not* one rule per
@@ -915,7 +1044,18 @@ its bug via the existing link.
     them; verify the real shapes in the sandbox before enabling it anywhere.
     Confirm too what a group-restricted BMO bug's webhook payload contains
     for `is_private` and `groups`.
-11. **Actor-check coverage on the Bugzilla side** — `WebhookEvent.user` is
+11. **Duplicate suppression is in-process only (v4).** The cache is bounded
+    and per-instance, so two instances do not share it and a restart forgets
+    it. Field writes are idempotent regardless; the exposure is a
+    *redelivered comment* posting twice across instances. A shared store
+    (Redis) is the real fix and is deliberately not half-built. Mitigate
+    meanwhile by keeping the subscription's ack deadline generous enough that
+    redelivery is rare.
+12. **Out-of-order delivery (v4).** Without an ordering key, Pub/Sub may
+    deliver a bug's events out of sequence, which weakens D11's conflict rule
+    (it compares against "the value before this change"). Set an ordering key
+    on the bug id if the publisher can.
+13. **Actor-check coverage on the Bugzilla side** — `WebhookEvent.user` is
     `Optional`, so the echo gate cannot fire on an actor-less event. Mitigated
     by D7 read-before-write; worth confirming with BMO which event classes can
     legitimately arrive without a `user`.
