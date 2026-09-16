@@ -7,9 +7,9 @@
 > **Audience:** Reviewers and implementers. This document does not itself change
 > behavior; it is the design and traceability reference the implementation PRs
 > will point back to.
-> **Revision:** v4 — the inbound transport is now **Pub/Sub push**, not a
-> direct Jira Automation web request, and a Jira label can halt syncing for a
-> pair. See "What changed in v4". v3 incorporated the PR #1386 review
+> **Revision:** v5 — the transport is **Pub/Sub pull** (a streaming-pull
+> consumer process), correcting v4's push subscription; a Jira label can halt
+> syncing for a pair. See "What changed in v4". v3 incorporated the PR #1386 review
 > feedback, indexed in "Review feedback — what changed in v3".
 
 ---
@@ -34,7 +34,7 @@ Requested by the repo admin, and implemented before Phase 2 continues.
 
 | Change | Why it matters here |
 |---|---|
-| **Transport is Pub/Sub push**, for *both* Bugzilla and Jira events, replacing the direct Automation web request and the BMO webhook as the primary path. | Supersedes the §1 "Push over polling" decision and rewrites §7 and §12. Retries, backoff and dead-lettering become subscription configuration; the broker's dead-letter topic replaces the file-based dead-letter queue, which resolves two v3 limitations (the queue could not hold Jira events, and it assumed a single instance). |
+| **Transport is Pub/Sub pull** (v5, correcting v4's push), for *both* Bugzilla and Jira events, replacing the direct Automation web request and the BMO webhook as the primary path. | Supersedes the §1 "Push over polling" decision and rewrites §7 and §12. Retries, backoff and dead-lettering become subscription configuration; the broker's dead-letter topic replaces the file-based dead-letter queue, which resolves two v3 limitations (the queue could not hold Jira events, and it assumed a single instance). A consumer process is a second deployment unit, with flow control, ordering keys and a bounded pull window to operate. |
 | **One ingest seam** (`jbi/ingest.py`) that every transport calls. | Each transport previously wired itself into the core differently. The seam returns an *acknowledgement decision*, which HTTP never needed but a broker requires. |
 | **Duplicate suppression** on the broker message id. | At-least-once delivery makes duplicates normal. Most of the pipeline is idempotent already, but a redelivered comment event would post twice. |
 | **A sync-stop label** halts a pair in both directions (new Invariant E). | Gives humans an escape hatch that outranks every other rule, without a deploy or a config change. |
@@ -47,7 +47,7 @@ rather than infer it.
 
 | Area | Decision |
 |---|---|
-| Transport (v4) | **Pub/Sub push** for both Bugzilla and Jira events → `POST /pubsub_push`. The service stays stateless: no consumer process, and retry/backoff/dead-letter are subscription config. The Automation rule still *originates* Jira events but publishes to a topic rather than calling JBI directly; `/jira_webhook` and `/bugzilla_webhook` remain for compatibility and local testing. |
+| Transport (v5) | **Pub/Sub pull**: a streaming-pull consumer (`python -m jbi consume`) running as its own process beside the web service. Retry/backoff/dead-letter are subscription config. The Automation rule still *originates* Jira events but publishes to a topic rather than calling JBI directly; `/jira_webhook` and `/bugzilla_webhook` remain for compatibility and local testing. |
 | Event injection (v4) | **One seam**, `jbi.ingest.ingest_event(InboundEvent) -> IngestResult`, called by every transport. Its outcome (`HANDLED`/`IGNORED`/`RETRY`/`PERMANENT_FAILURE`) is the ack decision; `IGNORED` **acks**, because an event JBI does not act on is normal traffic. |
 | Inbound Jira rule | **One centrally-owned, multi-project** Automation rule scoped by JQL (not one per project — see §12), now publishing to the topic. |
 | Reverse status/resolution | **Never invert `status_map`** — it is many-to-one. Reverse *status* is derived from Jira's `statusCategory`; reverse *resolution* from the inverted per-action `resolution_map`. (§4.1) |
@@ -72,14 +72,20 @@ rather than infer it.
   covers 35 Jira projects, so a per-project rule would mean 35 hand-built,
   independently-drifting copies owned by 35 different project admins. One rule
   scoped by JQL keeps onboarding, auditing, and revocation in one place (§12).
-- **Pub/Sub push over a direct web request** because the broker already
-  solves what we would otherwise hand-roll: retry with backoff, dead-lettering,
-  and a buffer when JBI is down. Push rather than pull keeps JBI a stateless
-  web service — no consumer process, no second deployment unit, no graceful
-  shutdown logic — and makes the delivery policy reviewable configuration
-  instead of code. The cost is that acknowledgement is expressed as an HTTP
-  status, so "ignored" must return 200; an error there would redeliver an
-  out-of-scope event until it expired.
+- **Pub/Sub over a direct web request** because the broker already solves
+  what we would otherwise hand-roll: retry with backoff, dead-lettering, and a
+  buffer when JBI is down.
+- **Pull rather than push** (v5, corrected from v4) because pull gives
+  explicit control over concurrency and ordering: flow control decides how
+  many messages are in flight, and ordering keys keep a single bug's events
+  in sequence — which the reverse conflict rule depends on, since it compares
+  against "the value before this change". The costs are real and accepted: a
+  second deployment unit, a bounded pull window, and signal handling. Two
+  operational lessons are taken from the reference implementation rather than
+  relearned — flow control must never be `max_messages=1` (it serialises every
+  ordering key behind one slot and strands held messages at teardown), and
+  messages still held when the window closes are abandoned and redelivered,
+  which the log must say out loud.
 - **Symmetric loop prevention** because a write is a write in both systems: a
   reverse write into BMO fires BMO's normal webhook and re-enters the forward
   pipeline exactly like a human edit would. Suppressing echoes on only the Jira
@@ -475,15 +481,17 @@ JBI's own service account (loop-prevention), resolves identities and enforces
 visibility, and applies the write-back denylist (§4).
 
 ```
-                    v4 transport: both sources publish to one topic
+                    v5 transport: both sources publish to one topic
 Bugzilla --event--> [ Pub/Sub topic ] <--event-- Jira Automation (central, JQL-scoped)
                             |
-                     push subscription
-                            v
-                    POST /pubsub_push  (HTTP status == ack)
+                 pull subscription (ordering key = bug id)
+                            |
+                 `python -m jbi consume`  -- its own process
+                   streaming pull, flow control, SIGTERM-aware
                             |
                      jbi.ingest.ingest_event(InboundEvent) -> IngestResult
-                            |            (dedupe on message_id)
+                            |            (dedupe on delivery_id)
+                     ack / nack from the outcome
               +-------------+-------------+
               |                           |
         source=bugzilla             source=jira
@@ -517,9 +525,9 @@ pipeline that produced it.
   bounded and **in-process**: adequate for the redelivery bursts a broker
   produces, explicitly not a distributed guarantee. A shared store is the
   real answer and is deferred rather than half-built (§13-12).
-- `jbi/pubsub.py` — envelope decoding, source detection (`source` attribute
-  first, payload shape as fallback), and the `/pubsub_push` endpoint's
-  permanent-vs-transient distinction.
+- `jbi/consumer.py` — the streaming-pull consumer: message decoding, source
+  detection (`event_source` attribute first, payload shape as fallback), the
+  permanent-vs-transient distinction, ack/nack, flow control and shutdown.
 
 **New modules (v3)** — kept as new files so the diff is legible and the forward path is
 untouched:
@@ -572,7 +580,7 @@ codebase, and the specific files/functions a PR will touch. Verdicts:
 | **R-12** visibility on write-back | ❌ | `jbi/visibility.py`: `bug_restriction_reason` (BMO `groups`/`is_private`, used by *both* directions) + `can_copy_jira_text_to_bug` (Jira `comment.visibility`, `jsdPublic`, `fields.security`). Forward path also drops private comments/attachments. Gated by `reverse_comment_sync_enabled`, default off. See Invariant D. |
 | **R-13** reconciliation report | ❌ | `jbi/reconcile.py` standalone job (retry.py pattern). |
 | **T-01** transport-agnostic ingestion (v4) | ✅ done | `jbi/ingest.py`: `InboundEvent` envelope, `IngestResult` ack decision, message-id dedupe. Every transport converges here. |
-| **T-02** Pub/Sub push delivery (v4) | ✅ done | `jbi/pubsub.py` + `POST /pubsub_push`. Ack via HTTP status; undecodable payloads dropped with 200; 503 only for transient failures. |
+| **T-02** Pub/Sub pull consumer (v5) | ✅ done | `jbi/consumer.py` + `python -m jbi consume`. Streaming pull, flow control (never 1), ordering keys, `await_callbacks_on_shutdown`, SIGTERM handling, bounded pull window. IGNORED/PERMANENT ack; RETRY and unexpected errors nack. |
 | **T-03** sync-stop label (v4) | ✅ done | `writeback.sync_is_stopped`, gated in `runner.do_execute_actions` (forward) and `jira_inbound.handler` (reverse). Invariant E. |
 
 ---
@@ -755,15 +763,19 @@ transport does not; duplicate message ids do no work twice; the dedupe cache's
 eviction bound is asserted, not assumed. · *Acceptance:* existing webhook
 behavior unchanged. · *Depends:* —
 
-**D14 — Pub/Sub push (v4).**
+**D14 — Pub/Sub pull consumer (v5).**
 *Accomplishes:* both sources delivered through the broker, with retry and
-dead-lettering owned by the subscription. · *Files:* `jbi/pubsub.py`,
-`router.py` (`POST /pubsub_push`, token-or-header auth). · *Tests:*
-`test_pubsub.py` — base64/JSON/schema failures are permanent and ack;
-`source` attribute beats shape sniffing; an unknown source is dropped
-loudly; ignored events return 200; transient failures return 503; a Bugzilla
-event reaches the forward pipeline through the broker. · *Acceptance:* an
-out-of-scope event is never redelivered. · *Depends:* D13.
+dead-lettering owned by the subscription, and explicit control over
+concurrency and ordering. · *Files:* `jbi/consumer.py`, `jbi/__main__.py`
+(`consume` command), `environment.py` (subscription settings). · *Tests:*
+`test_consumer.py` — UTF-8/JSON/schema failures ack rather than retry;
+`event_source` beats shape sniffing and an unknown value is rejected;
+`delivery_id` is preferred over the broker message id; IGNORED acks; RETRY
+and unexpected errors nack; flow control is never 1; the pull-window warning
+names the abandoned-messages behavior; the shutdown race is matched
+whichever way round the client words it. · *Acceptance:* an out-of-scope
+event is never redelivered, and a backlog drains within the pull window. ·
+*Depends:* D13.
 
 **D15 — Sync-stop label (v4).**
 *Accomplishes:* a human escape hatch that needs no deploy. · *Files:*
@@ -924,24 +936,34 @@ its bug via the existing link.
 one push subscription.
 - **Topic** with both publishers: the Bugzilla side (a relay, or BMO itself if
   it can publish) and the Jira Automation rule.
-- **Push subscription** → `POST https://<jbi-host>/pubsub_push`. The endpoint
-  accepts the shared secret as `?token=` because a push subscription cannot
-  set request headers; **Pub/Sub OIDC push auth is the stronger production
-  option** and is recorded as follow-up (ADR 005), not assumed here.
+- **Pull subscription** consumed by `python -m jbi consume`, deployed as its
+  own unit (a Cloud Run job or a second service) beside the web app. It
+  authenticates with application default credentials and needs
+  `roles/pubsub.subscriber`; there is no inbound HTTP and therefore no shared
+  secret in a URL.
+- **Pull window** (`PUBSUB_PULL_TIMEOUT_SECONDS`, default 540) must stay below
+  both the lease duration and any Cloud Run job task timeout, so the process
+  exits cleanly instead of being killed mid-message.
+- **Concurrency** (`PUBSUB_MAX_CONCURRENT_MESSAGES`, default 10) must never be
+  1: one slot serialises every ordering key, so a backlog cannot drain before
+  the window closes and held ordered messages are stranded.
 - **Retry policy**: exponential backoff, and a **dead-letter topic** with a
   max-delivery-attempts limit. This replaces JBI's file-based dead-letter
   queue for broker-delivered events, and resolves two v3 limitations — the
   queue could not hold Jira events, and it assumed a single instance.
-- **Ordering**: enable an ordering key of the **bug id** if available.
-  Without it, a status change and a comment on the same bug can arrive out of
-  order. Not fatal (each write is independent and idempotent) but it makes
-  the reverse conflict rule less reliable, since "the previous value" assumes
-  events arrive in sequence.
-- **Message attributes**: publishers should set `source` to `bugzilla` or
-  `jira`. JBI falls back to payload-shape detection, but an explicit
+- **Ordering**: enable message ordering on the subscription with an ordering
+  key of the **bug id**. Without it, a status change and a comment on the
+  same bug can arrive out of order — not fatal, since each write is
+  independent and idempotent, but it makes the reverse conflict rule less
+  reliable, because "the previous value" assumes events arrive in sequence.
+  With pull, ordering and concurrency interact: per-key order is preserved
+  while different keys process in parallel.
+- **Message attributes**: publishers should set `event_source` to `bugzilla`
+  or `jira`, and a stable `delivery_id` (preferred over the broker message id
+  for duplicate suppression, because it survives a redelivery). JBI falls back to payload-shape detection, but an explicit
   attribute is what keeps a future third payload shape from being guessed at.
-- IAM: JBI's service account needs only the subscription's push target to be
-  reachable; it does not need Pub/Sub API permissions at all in push mode.
+- IAM: the consumer's service account needs `roles/pubsub.subscriber` on the
+  subscription.
 
 **The sync-stop label (v4).**
 - Choose one label name per action (`sync_stop_label`, eg. `jbi-sync-stop`)
@@ -1044,12 +1066,14 @@ one push subscription.
     them; verify the real shapes in the sandbox before enabling it anywhere.
     Confirm too what a group-restricted BMO bug's webhook payload contains
     for `is_private` and `groups`.
-11. **Duplicate suppression is in-process only (v4).** The cache is bounded
-    and per-instance, so two instances do not share it and a restart forgets
-    it. Field writes are idempotent regardless; the exposure is a
-    *redelivered comment* posting twice across instances. A shared store
-    (Redis) is the real fix and is deliberately not half-built. Mitigate
-    meanwhile by keeping the subscription's ack deadline generous enough that
+11. **Duplicate suppression is in-process only.** The cache is bounded and
+    per-process, so two consumer replicas do not share it and a restart
+    forgets it. Field writes are idempotent regardless; the exposure is a
+    *redelivered comment* posting twice across replicas. The reference
+    implementation solves this with a Firestore-backed idempotency service
+    keyed on `delivery_id` with a 24h TTL — the right shape, and the obvious
+    next step if JBI runs more than one consumer. Until then, run a single
+    consumer replica and keep the ack deadline generous enough that
     redelivery is rare.
 12. **Out-of-order delivery (v4).** Without an ordering key, Pub/Sub may
     deliver a bug's events out of sequence, which weakens D11's conflict rule
