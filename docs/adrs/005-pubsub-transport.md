@@ -1,7 +1,7 @@
-# Deliver Events via Pub/Sub Push, Behind a Single Ingest Seam
+# Deliver Events via a Pub/Sub Pull Consumer, Behind a Single Ingest Seam
 
 - Status: Accepted
-- Date: 2026-09-16
+- Date: 2026-09-16 (revised same day: pull, not push)
 
 Supersedes the transport decision in
 `docs/bmo-jira-bidirectional-integration-plan.md` §1 ("Push over polling" via a
@@ -34,11 +34,17 @@ the source, the typed payload, and broker metadata (message id, delivery
 attempt). The result carries an *acknowledgement decision*:
 `HANDLED`, `IGNORED`, `RETRY`, `PERMANENT_FAILURE`.
 
-**2. Pub/Sub push, not pull.** A push subscription POSTs to
-`/pubsub_push`. JBI stays a stateless web service: no consumer process, no
-second deployment unit, no graceful-shutdown logic, and the delivery policy
-(backoff, max attempts, dead-letter topic) becomes reviewable configuration
-rather than code.
+**2. Pub/Sub pull, not push.** A streaming-pull consumer
+(`python -m jbi consume`) runs as its own process beside the web service.
+Pull gives explicit control over concurrency and ordering: flow control
+bounds how many messages are in flight, and ordering keys keep one bug's
+events in sequence.
+
+*This reverses the first version of this ADR, which chose push.* Push was
+argued for on the grounds that it keeps JBI stateless and turns delivery
+policy into configuration, which remains true — but it gives up ordering
+control, and the reverse conflict rule depends on sequence, since it
+compares against "the value before this change".
 
 **3. Both sources through one topic.** Bugzilla and Jira events share the
 transport, so there is one retry story and one dead-letter topic. The direct
@@ -48,16 +54,32 @@ HTTP endpoints remain for compatibility and local testing.
 
 ## Consequences
 
-**Acknowledgement is an HTTP status**, which forces three rules that are easy
-to get wrong:
+**Acknowledgement is an explicit ack/nack**, which forces three rules that
+are easy to get wrong:
 
-- An event JBI deliberately ignores must return **200**. Returning an error
-  for "out of scope" or "self-authored" would have the subscription redeliver
-  it until it expired — and those are the *majority* of events.
-- An undecodable payload also returns 200 and is dropped with a log.
-  Redelivery cannot fix bad base64 or a payload that does not match the
-  schema.
-- Only genuine transient failures return 5xx.
+- An event JBI deliberately ignores must **ack**. Nacking "out of scope" or
+  "self-authored" would redeliver it until it expired — and those are the
+  *majority* of events.
+- An undecodable payload also acks, with a log. Redelivery cannot fix data
+  that is not UTF-8, not JSON, or does not match the schema.
+- Only genuine transient failures nack. An unexpected exception nacks too:
+  the state is unknown, so redelivering is safer than dropping, and duplicate
+  suppression covers the replay.
+
+**A second deployment unit.** The consumer is a separate process with its own
+lifecycle: SIGTERM handling, `await_callbacks_on_shutdown`, a bounded pull
+window that must sit below both the lease duration and any job task timeout,
+and a grace period so in-flight acks complete.
+
+**Two operational constraints inherited from the reference implementation**,
+recorded because they were learned there the hard way:
+
+- Flow control must never be `max_messages=1`. One slot serialises every
+  ordering key, so a backlog cannot drain before the pull window closes and
+  held ordered messages are stranded.
+- Messages still held for an ordering key when the window closes are
+  abandoned by the client and redelivered later. The client logs this without
+  context, so JBI's own warning names it and says which knob to turn.
 
 **The broker's dead-letter topic replaces the file queue** for
 broker-delivered events, which resolves the two Phase 1 limitations above.
@@ -68,32 +90,38 @@ already idempotent — Invariant A stops duplicate issues, read-before-write
 stops duplicate field writes — but a redelivered *comment* event would post
 twice, and no field-level check catches that. Hence the message-id cache.
 
-**The cache is a compromise we are naming, not hiding.** It is per-instance
-and forgotten on restart, so across two instances a redelivered comment can
-still double-post. A shared store (Redis) is the correct answer; building a
-distributed dedupe store was out of proportion to this change, and a
-half-built one would have been worse than an honest bounded cache. Tracked as
-plan §13-11.
+**The cache is a compromise we are naming, not hiding.** It is per-process
+and forgotten on restart, so across two consumer replicas a redelivered
+comment can still double-post. The reference implementation solves this with
+a Firestore-backed idempotency service keyed on `delivery_id` with a 24h
+TTL — the right shape, and the obvious next step if JBI ever runs more than
+one consumer. Until then the constraint is: **run a single consumer
+replica.** Tracked as plan §13-11.
 
 **Ordering is not guaranteed** unless the publisher sets an ordering key.
 Out-of-order events weaken the conflict rule that compares against "the value
 before this change". Recommended key: the bug id. Tracked as §13-12.
 
-**Auth is a shared secret in the query string**, because a push subscription
-cannot set request headers. This is weaker than the header-based auth used
-elsewhere: the token appears in URLs and therefore potentially in logs.
-Pub/Sub OIDC push authentication is the right production answer — the
-subscription signs a token JBI verifies against Google's keys, with no shared
-secret at all — and is deliberately left as follow-up rather than claimed as
-done.
+**No inbound HTTP, so no shared secret for this path.** The consumer
+authenticates to Pub/Sub with application default credentials and
+`roles/pubsub.subscriber`. This is a clear advantage of pull over push, which
+would have needed either a token in the URL (weaker than header auth, since
+URLs reach logs) or OIDC verification. The `?token=` query auth added for
+push remains only for the Bugzilla webhook, which can carry a URL and nothing
+else.
 
 ## Alternatives Considered
 
-**Pull subscription.** More control over throughput, concurrency and ordering,
-and no inbound HTTP at all. Rejected for now: it needs a long-running consumer
-process, explicit ack/nack, graceful shutdown, and a second deployment unit to
-run and monitor — a much larger change for benefits this traffic volume does
-not yet need. The ingest seam means switching later touches only the transport.
+**Push subscription.** Keeps JBI a single stateless service and needs no
+consumer process — genuinely simpler to deploy. Rejected: acknowledgement
+becomes an HTTP status code, concurrency is whatever the subscription decides,
+and ordering control is lost. It also needs a secret in the push URL or OIDC
+verification, where pull needs neither.
+
+*This ADR originally chose push and was revised the same day.* The ingest
+seam is what made the reversal cheap: only the transport module and its tests
+changed, and the ack semantics carried over unaltered, which is some evidence
+the seam is drawn in the right place.
 
 **Keep direct webhooks, add retries in JBI.** Rejected: it means reimplementing
 backoff, dead-lettering and buffering that the broker already provides, and it
