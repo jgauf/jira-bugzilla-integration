@@ -7,6 +7,7 @@ import secrets
 from pathlib import Path
 from typing import Annotated, Any, Optional
 
+from dockerflow.logging import request_id_context
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse
@@ -18,12 +19,10 @@ from jbi.bugzilla import models as bugzilla_models
 from jbi.bugzilla import service as bugzilla_service
 from jbi.configuration import get_actions
 from jbi.environment import Settings, get_settings
-from jbi.errors import IgnoreInvalidRequestError
+from jbi.ingest import EventSource, InboundEvent, IngestOutcome, ingest_event
 from jbi.jira_inbound import models as jira_inbound_models
-from jbi.jira_inbound.handler import execute_jira_event
 from jbi.models import Actions
 from jbi.queue import DeadLetterQueue, get_dl_queue
-from jbi.runner import execute_or_queue
 
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 ActionsDep = Annotated[Actions, Depends(get_actions)]
@@ -82,7 +81,18 @@ async def bugzilla_webhook(
     webhook_request: bugzilla_models.WebhookRequest = Body(..., embed=False),
 ):
     """API endpoint that Bugzilla Webhook Events request"""
-    return await execute_or_queue(webhook_request, queue, actions)
+    result = await ingest_event(
+        InboundEvent(
+            source=EventSource.BUGZILLA,
+            payload=webhook_request,
+            rid=request_id_context.get(),
+        ),
+        actions,
+        queue=queue,
+    )
+    # The response shape is preserved for compatibility with the existing
+    # webhook contract; the outcome is what transports act on.
+    return result.details or {"status": str(result.outcome), "error": result.reason}
 
 
 @router.post(
@@ -100,12 +110,20 @@ async def jira_webhook(
     act on -- the overwhelming majority -- are reported as `ignored` rather
     than as errors, since Jira Automation forwards far more than JBI handles.
     """
-    try:
-        details = execute_jira_event(jira_event, actions)
-    except IgnoreInvalidRequestError as exc:
-        logger.info("Ignore inbound Jira event: %s", exc)
-        return {"status": "ignored", "reason": str(exc)}
-    return {"status": "handled", "details": details}
+    result = await ingest_event(
+        InboundEvent(
+            source=EventSource.JIRA,
+            payload=jira_event,
+            rid=request_id_context.get(),
+        ),
+        actions,
+    )
+    if result.outcome == IngestOutcome.IGNORED:
+        logger.info("Ignore inbound Jira event: %s", result.reason)
+        return {"status": "ignored", "reason": result.reason}
+    if result.outcome == IngestOutcome.RETRY:
+        raise HTTPException(status_code=500, detail=result.reason)
+    return {"status": "handled", "details": result.details}
 
 
 @router.get(

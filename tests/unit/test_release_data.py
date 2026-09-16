@@ -13,7 +13,6 @@ from jbi.bugzilla.models import Bug
 from jbi.jira import JiraService
 from jbi.steps import _milestone_label, _release_flag_labels
 
-
 # --- Harvesting the dynamic BMO fields --------------------------------------
 
 
