@@ -613,3 +613,34 @@ def test_jira_webhook_does_not_touch_the_bugzilla_path(
     )
 
     assert not mocked_bugzilla.update_bug.called
+
+
+# --- Query-string auth for producers that cannot set headers ---------------
+
+
+@pytest.mark.parametrize("path", ["/bugzilla_webhook", "/jira_webhook", "/pubsub_push"])
+def test_token_query_param_authenticates(anon_client, test_api_key, path, mocked_jira):
+    """A Bugzilla webhook takes only a URL, and a Pub/Sub push subscription
+    cannot add headers, so the shared secret has to work in the query string.
+    A 401 here would make those producers unusable."""
+    mocked_jira.get_issue_remote_links.return_value = []
+
+    response = anon_client.post(
+        f"{path}?token={test_api_key}",
+        json={},
+        headers={"Content-Type": "application/json"},
+    )
+
+    # 422 (bad body) proves authentication passed; 401 would mean it did not.
+    assert response.status_code != 401
+
+
+@pytest.mark.parametrize("path", ["/bugzilla_webhook", "/jira_webhook", "/pubsub_push"])
+def test_wrong_token_is_rejected(anon_client, path):
+    response = anon_client.post(
+        f"{path}?token=not-the-key",
+        json={},
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 401

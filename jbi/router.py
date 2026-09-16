@@ -60,9 +60,20 @@ def api_key_auth(
     settings: SettingsDep,
     api_key: Annotated[str, Depends(header_scheme)],
     basic_auth: Annotated[HTTPBasicCredentials, Depends(basicauth_scheme)],
+    token: Optional[str] = None,
 ):
+    """Authenticate a request by header, basic auth, or `?token=`.
+
+    The query-string form exists because some producers cannot set request
+    headers at all -- a Bugzilla webhook takes only a URL, and a Pub/Sub push
+    subscription signs requests rather than letting you add headers. It is
+    the weakest of the three (a URL can reach access logs and browser
+    history), so prefer the header wherever the producer supports it.
+    """
     if not api_key and basic_auth:
         api_key = basic_auth.password
+    if not api_key and token:
+        api_key = token
     if not api_key or not secrets.compare_digest(api_key, settings.jbi_api_key):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -71,32 +82,12 @@ def api_key_auth(
         )
 
 
-def pubsub_auth(
-    settings: SettingsDep,
-    api_key: Annotated[str, Depends(header_scheme)],
-    token: Optional[str] = None,
-):
-    """Authenticate a Pub/Sub push delivery.
-
-    A push subscription cannot set arbitrary request headers, so the shared
-    secret is accepted as a `?token=` query parameter as well as the usual
-    `X-Api-Key` header. Both are compared in constant time.
-
-    For production, Pub/Sub OIDC push authentication is stronger than a shared
-    secret and needs no query string -- recorded as follow-up rather than
-    silently assumed (see ADR 005).
-    """
-    presented = api_key or token or ""
-    if not presented or not secrets.compare_digest(presented, settings.jbi_api_key):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect API Key",
-        )
-
-
 @router.post(
     "/pubsub_push",
-    dependencies=[Depends(pubsub_auth)],
+    # Same auth as every other endpoint; a push subscription cannot set
+    # headers, so it uses the `?token=` form. Pub/Sub OIDC push auth is the
+    # stronger production answer -- see ADR 005.
+    dependencies=[Depends(api_key_auth)],
 )
 async def pubsub_push(
     actions: ActionsDep,
