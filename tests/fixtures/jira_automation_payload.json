@@ -10,11 +10,6 @@
             "histories": null
         },
         "fields": {
-            "customfield_13342": {
-                "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/customFieldOption/15410",
-                "value": "Other",
-                "id": "15410"
-            },
             "statusCategory": {
                 "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/statuscategory/4",
                 "id": 4,
@@ -23,49 +18,10 @@
                 "name": "In Progress"
             },
             "resolution": null,
-            "customfield_11955": {
-                "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/customFieldOption/13627",
-                "value": "na",
-                "id": "13627",
-                "child": {
-                    "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/customFieldOption/13630",
-                    "value": "N/A",
-                    "id": "13630"
-                }
-            },
-            "customfield_10623": 0.0,
-            "customfield_11954": {
-                "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/customFieldOption/13661",
-                "value": "na",
-                "id": "13661",
-                "child": {
-                    "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/customFieldOption/13664",
-                    "value": "N/A",
-                    "id": "13664"
-                }
-            },
-            "customfield_10624": 0.0,
-            "customfield_11956": {
-                "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/customFieldOption/13577",
-                "value": "na",
-                "id": "13577",
-                "child": {
-                    "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/customFieldOption/13596",
-                    "value": "N/A",
-                    "id": "13596"
-                }
-            },
-            "lastViewed": "2026-09-24T10:11:57.981-0400",
             "labels": [
                 "bugzilla",
                 "jbi-sandbox"
             ],
-            "aggregatetimeoriginalestimate": null,
-            "customfield_10619": {
-                "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/customFieldOption/11669",
-                "value": "Sale",
-                "id": "11669"
-            },
             "issuelinks": [],
             "assignee": {
                 "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/user?accountId=712020%3Ab4494526-035e-4c6a-9d91-d42e37912bc9",
@@ -73,12 +29,6 @@
                 "key": null,
                 "accountId": "712020:b4494526-035e-4c6a-9d91-d42e37912bc9",
                 "emailAddress": null,
-                "avatarUrls": {
-                    "48x48": "https://secure.gravatar.com/avatar/b0f587daa3c3dc8967e8c85fce8af61a?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJG-1.png",
-                    "24x24": "https://secure.gravatar.com/avatar/b0f587daa3c3dc8967e8c85fce8af61a?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJG-1.png",
-                    "16x16": "https://secure.gravatar.com/avatar/b0f587daa3c3dc8967e8c85fce8af61a?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJG-1.png",
-                    "32x32": "https://secure.gravatar.com/avatar/b0f587daa3c3dc8967e8c85fce8af61a?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJG-1.png"
-                },
                 "displayName": "John Gauf",
                 "active": true,
                 "timeZone": "America/Indiana/Indianapolis",
@@ -87,41 +37,11 @@
                 "accountType": "atlassian"
             },
             "components": [],
-            "subtasks": [],
             "reporter": {
-                "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/user?accountId=712020%3Ab4494526-035e-4c6a-9d91-d42e37912bc9",
-                "name": null,
-                "key": null,
                 "accountId": "712020:b4494526-035e-4c6a-9d91-d42e37912bc9",
                 "emailAddress": null,
-                "avatarUrls": {
-                    "48x48": "https://secure.gravatar.com/avatar/b0f587daa3c3dc8967e8c85fce8af61a?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJG-1.png",
-                    "24x24": "https://secure.gravatar.com/avatar/b0f587daa3c3dc8967e8c85fce8af61a?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJG-1.png",
-                    "16x16": "https://secure.gravatar.com/avatar/b0f587daa3c3dc8967e8c85fce8af61a?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJG-1.png",
-                    "32x32": "https://secure.gravatar.com/avatar/b0f587daa3c3dc8967e8c85fce8af61a?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJG-1.png"
-                },
                 "displayName": "John Gauf",
-                "active": true,
-                "timeZone": "America/Indiana/Indianapolis",
-                "groups": null,
-                "locale": null,
-                "accountType": "atlassian"
-            },
-            "progress": {
-                "progress": 0,
-                "total": 0
-            },
-            "votes": {
-                "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/issue/AIPLAT-1306/votes",
-                "votes": 0,
-                "hasVoted": false
-            },
-            "worklog": {
-                "maxResults": 20,
-                "total": 0,
-                "startAt": 0,
-                "worklogs": [],
-                "last": false
+                "active": true
             },
             "issuetype": {
                 "namedValue": "Bug",
@@ -142,12 +62,6 @@
                 "key": "AIPLAT",
                 "name": "Fx AI Platform",
                 "description": null,
-                "avatarUrls": {
-                    "48x48": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/universal_avatar/view/type/project/avatar/10404",
-                    "24x24": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/universal_avatar/view/type/project/avatar/10404?size=small",
-                    "16x16": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/universal_avatar/view/type/project/avatar/10404?size=xsmall",
-                    "32x32": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/universal_avatar/view/type/project/avatar/10404?size=medium"
-                },
                 "issuetypes": null,
                 "projectCategory": {
                     "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/projectCategory/10010",
@@ -162,41 +76,9 @@
                 "projectTypeKey": "software",
                 "simplified": false
             },
-            "customfield_14748": [],
-            "customfield_10029": [],
-            "resolutiondate": null,
-            "watches": {
-                "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/issue/AIPLAT-1306/watchers",
-                "watchCount": 1,
-                "isWatching": false
-            },
-            "customfield_10382": [],
-            "customfield_10019": "2|i0utaj:",
             "updated": 1790259123973,
-            "timeoriginalestimate": null,
             "description": "Throwaway bug for testing the BMO<->Jira bidirectional integration harness. Safe to close or delete.",
-            "customfield_14610": {
-                "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/customFieldOption/16512",
-                "value": "No",
-                "id": "16512"
-            },
-            "timetracking": {
-                "originalEstimate": null,
-                "remainingEstimate": null,
-                "timeSpent": null,
-                "originalEstimateSeconds": 0,
-                "remainingEstimateSeconds": 0,
-                "timeSpentSeconds": 0
-            },
-            "customfield_14847": [],
             "summary": "JBI harness: renamed from Jira",
-            "customfield_10000": "{}",
-            "customfield_10484": {
-                "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/customFieldOption/11258",
-                "value": "Unscheduled",
-                "id": "11258"
-            },
-            "customfield_10002": [],
             "environment": null,
             "duedate": null,
             "comment": {
@@ -206,9 +88,7 @@
                 "comments": [],
                 "last": false
             },
-            "statuscategorychangedate": "2026-09-24T10:12:03.974-0400",
             "fixVersions": [],
-            "customfield_13179": "*{color:maroon} \u2139\ufe0f Please note: this Jira issue will be synced with GitHub and will be viewable outside of Mozilla's Jira org{color}*",
             "priority": {
                 "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/priority/10004",
                 "id": 10004,
@@ -216,13 +96,6 @@
                 "iconUrl": "https://mozilla-hub-sandbox-721.atlassian.net/images/icons/priorities/trivial.svg",
                 "namedValue": "None"
             },
-            "customfield_10338": {
-                "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/customFieldOption/12268",
-                "value": "Compliant",
-                "id": "12268"
-            },
-            "timeestimate": null,
-            "versions": [],
             "status": {
                 "untranslatedNameValue": null,
                 "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/status/3",
@@ -239,142 +112,10 @@
                     "name": "In Progress"
                 }
             },
-            "customfield_10567": "If creating a new position, please enter TBD",
-            "customfield_10449": "Specify needs beyond translation. Our vendors provide localization, transcreation, and other services (e.g. audio, video or image creation).",
-            "aggregatetimeestimate": null,
-            "creator": {
-                "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/user?accountId=712020%3Ab4494526-035e-4c6a-9d91-d42e37912bc9",
-                "name": null,
-                "key": null,
-                "accountId": "712020:b4494526-035e-4c6a-9d91-d42e37912bc9",
-                "emailAddress": null,
-                "avatarUrls": {
-                    "48x48": "https://secure.gravatar.com/avatar/b0f587daa3c3dc8967e8c85fce8af61a?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJG-1.png",
-                    "24x24": "https://secure.gravatar.com/avatar/b0f587daa3c3dc8967e8c85fce8af61a?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJG-1.png",
-                    "16x16": "https://secure.gravatar.com/avatar/b0f587daa3c3dc8967e8c85fce8af61a?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJG-1.png",
-                    "32x32": "https://secure.gravatar.com/avatar/b0f587daa3c3dc8967e8c85fce8af61a?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJG-1.png"
-                },
-                "displayName": "John Gauf",
-                "active": true,
-                "timeZone": "America/Indiana/Indianapolis",
-                "groups": null,
-                "locale": null,
-                "accountType": "atlassian"
-            },
-            "customfield_10680": {
-                "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/customFieldOption/11840",
-                "value": "No",
-                "id": "11840"
-            },
-            "customfield_10681": {
-                "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/customFieldOption/11844",
-                "value": "No",
-                "id": "11844"
-            },
-            "aggregateprogress": {
-                "progress": 0,
-                "total": 0
-            },
-            "customfield_10682": {
-                "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/customFieldOption/11846",
-                "value": "No",
-                "id": "11846"
-            },
-            "customfield_10683": {
-                "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/customFieldOption/11849",
-                "value": "No",
-                "id": "11849"
-            },
-            "customfield_10679": {
-                "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/customFieldOption/11837",
-                "value": "No",
-                "id": "11837"
-            },
-            "customfield_10316": "Enter text here",
-            "timespent": null,
-            "aggregatetimespent": null,
-            "customfield_10310": 0.0,
-            "customfield_10429": "2026-09-15",
-            "workratio": -1,
-            "issuerestriction": {
-                "issuerestrictions": {},
-                "shouldDisplay": false
-            },
             "created": 1789502051183,
-            "customfield_10662": [],
-            "customfield_10413": [],
-            "customfield_10657": 0.0,
-            "customfield_10530": [
-                {
-                    "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/user?accountId=6047c8af2b3f9a006a370a33",
-                    "accountId": "6047c8af2b3f9a006a370a33",
-                    "avatarUrls": {
-                        "48x48": "https://secure.gravatar.com/avatar/7a8f7be3e7a11c7ce7a7eed09c2e20fa?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FDM-3.png",
-                        "24x24": "https://secure.gravatar.com/avatar/7a8f7be3e7a11c7ce7a7eed09c2e20fa?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FDM-3.png",
-                        "16x16": "https://secure.gravatar.com/avatar/7a8f7be3e7a11c7ce7a7eed09c2e20fa?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FDM-3.png",
-                        "32x32": "https://secure.gravatar.com/avatar/7a8f7be3e7a11c7ce7a7eed09c2e20fa?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FDM-3.png"
-                    },
-                    "displayName": "Daniel McKinley",
-                    "active": false,
-                    "timeZone": "America/Indiana/Indianapolis",
-                    "accountType": "atlassian"
-                },
-                {
-                    "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/user?accountId=6047ca88addbcd006ba8bdb0",
-                    "accountId": "6047ca88addbcd006ba8bdb0",
-                    "avatarUrls": {
-                        "48x48": "https://secure.gravatar.com/avatar/92f2ddab49b50bed978f2d6088be9c11?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJH-4.png",
-                        "24x24": "https://secure.gravatar.com/avatar/92f2ddab49b50bed978f2d6088be9c11?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJH-4.png",
-                        "16x16": "https://secure.gravatar.com/avatar/92f2ddab49b50bed978f2d6088be9c11?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJH-4.png",
-                        "32x32": "https://secure.gravatar.com/avatar/92f2ddab49b50bed978f2d6088be9c11?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJH-4.png"
-                    },
-                    "displayName": "Julie Hollek",
-                    "active": false,
-                    "timeZone": "America/Indiana/Indianapolis",
-                    "accountType": "atlassian"
-                },
-                {
-                    "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/user?accountId=6047ccc8b2ea12011598ebd8",
-                    "accountId": "6047ccc8b2ea12011598ebd8",
-                    "avatarUrls": {
-                        "48x48": "https://secure.gravatar.com/avatar/1f1f289cc67584d881d546354ee043b4?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FMR-1.png",
-                        "24x24": "https://secure.gravatar.com/avatar/1f1f289cc67584d881d546354ee043b4?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FMR-1.png",
-                        "16x16": "https://secure.gravatar.com/avatar/1f1f289cc67584d881d546354ee043b4?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FMR-1.png",
-                        "32x32": "https://secure.gravatar.com/avatar/1f1f289cc67584d881d546354ee043b4?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FMR-1.png"
-                    },
-                    "displayName": "Mark Reid",
-                    "active": false,
-                    "timeZone": "America/Indiana/Indianapolis",
-                    "accountType": "atlassian"
-                }
-            ],
-            "customfield_11977": 0.0,
             "security": null,
-            "customfield_10525": [
-                {
-                    "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/user?accountId=6151fc60a7071000692e90da",
-                    "accountId": "6151fc60a7071000692e90da",
-                    "avatarUrls": {
-                        "48x48": "https://secure.gravatar.com/avatar/fde70ef885141cc03a0ebe1fb160de93?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FAF-1.png",
-                        "24x24": "https://secure.gravatar.com/avatar/fde70ef885141cc03a0ebe1fb160de93?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FAF-1.png",
-                        "16x16": "https://secure.gravatar.com/avatar/fde70ef885141cc03a0ebe1fb160de93?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FAF-1.png",
-                        "32x32": "https://secure.gravatar.com/avatar/fde70ef885141cc03a0ebe1fb160de93?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FAF-1.png"
-                    },
-                    "displayName": "Alton Felts",
-                    "active": false,
-                    "timeZone": "America/Indiana/Indianapolis",
-                    "accountType": "atlassian"
-                }
-            ],
             "attachment": [],
-            "customfield_14682": {
-                "self": "https://mozilla-hub-sandbox-721.atlassian.net/rest/api/2/customFieldOption/16547",
-                "value": "Yes",
-                "id": "16547"
-            },
-            "customfield_11850": "0.0",
-            "customfield_10400": [],
-            "customfield_10516": "2026-09-15T15:54:00.000-0400"
+            "customfield_10037": null
         },
         "renderedFields": null
     },
@@ -384,12 +125,6 @@
         "key": "712020:b4494526-035e-4c6a-9d91-d42e37912bc9",
         "accountId": "712020:b4494526-035e-4c6a-9d91-d42e37912bc9",
         "emailAddress": "jgauf@mozilla.com",
-        "avatarUrls": {
-            "48x48": "https://secure.gravatar.com/avatar/b0f587daa3c3dc8967e8c85fce8af61a?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJG-1.png",
-            "24x24": "https://secure.gravatar.com/avatar/b0f587daa3c3dc8967e8c85fce8af61a?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJG-1.png",
-            "16x16": "https://secure.gravatar.com/avatar/b0f587daa3c3dc8967e8c85fce8af61a?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJG-1.png",
-            "32x32": "https://secure.gravatar.com/avatar/b0f587daa3c3dc8967e8c85fce8af61a?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJG-1.png"
-        },
         "displayName": "John Gauf",
         "active": true,
         "timeZone": null,

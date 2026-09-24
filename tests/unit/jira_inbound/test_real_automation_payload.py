@@ -3,6 +3,12 @@
 Everything here was verified by pointing a live sandbox rule at JBI through a
 tunnel. Each assertion corresponds to something that differed from what the
 plan assumed, so this file is the record of what Jira actually sends.
+
+The fixture is pruned: the real delivery carried ~200 mostly-null custom
+fields, avatar URLs containing md5 hashes of email addresses, and one custom
+field listing unrelated colleagues by name and account id. None of that is
+ours to commit, and none of it is read by JBI. The fields the code touches
+are kept verbatim.
 """
 
 import json

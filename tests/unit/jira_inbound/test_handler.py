@@ -269,3 +269,33 @@ def test_full_state_sync_can_be_opted_into(
     # correct reason: the fixture's bug is unassigned, and BMO rejects
     # `status: ASSIGNED` on a bug with no assignee.
     assert details["steps"]["writeback_status"] == "INCOMPLETE"
+
+
+def test_dead_credentials_ask_for_redelivery_rather_than_acking(
+    mocked_jira, jira_webhook_event, inbound_actions
+):
+    """The outage case must reach the transport as a retryable failure, not
+    as "ignored" -- otherwise every event in the outage window is acked and
+    lost."""
+    import requests
+
+    from jbi.ingest import EventSource, InboundEvent, IngestOutcome, ingest_event
+
+    mocked_jira.get_issue_remote_links.side_effect = requests.HTTPError(
+        response=mock.MagicMock(status_code=404)
+    )
+    mocked_jira.myself.side_effect = requests.HTTPError(
+        response=mock.MagicMock(status_code=401)
+    )
+
+    import asyncio
+
+    result = asyncio.run(
+        ingest_event(
+            InboundEvent(source=EventSource.JIRA, payload=jira_webhook_event),
+            inbound_actions,
+        )
+    )
+
+    assert result.outcome == IngestOutcome.RETRY
+    assert result.should_acknowledge is False

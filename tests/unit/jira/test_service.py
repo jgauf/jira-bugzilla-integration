@@ -1280,3 +1280,36 @@ def test_get_linked_bugzilla_bug_id_reraises_other_errors(mocked_jira):
 
     with pytest.raises(requests.HTTPError):
         service.get_linked_bugzilla_bug_id("JBI-234")
+
+
+# --- "cannot see it" is not "does not exist" -------------------------------
+
+
+def test_404_with_working_credentials_means_no_link(mocked_jira):
+    """A genuinely uncorrelated issue: acknowledge and move on."""
+    service = jira.JiraService(mocked_jira)
+    mocked_jira.get_issue_remote_links.side_effect = requests.HTTPError(
+        response=mock.MagicMock(status_code=404)
+    )
+    mocked_jira.myself.return_value = {"accountId": "abc"}
+
+    assert service.get_linked_bugzilla_bug_id("JBI-1") is None
+
+
+def test_404_with_dead_credentials_raises_instead_of_dropping(mocked_jira):
+    """Jira answers 404 both for "no such issue" and for "you cannot see it",
+    including when credentials stop working. Treating the second as "no
+    linked bug" acknowledges and discards every inbound event for the
+    duration of the outage -- observed live when a sandbox token expired."""
+    from jbi.jira.service import JiraAuthenticationError
+
+    service = jira.JiraService(mocked_jira)
+    mocked_jira.get_issue_remote_links.side_effect = requests.HTTPError(
+        response=mock.MagicMock(status_code=404)
+    )
+    mocked_jira.myself.side_effect = requests.HTTPError(
+        response=mock.MagicMock(status_code=401)
+    )
+
+    with pytest.raises(JiraAuthenticationError):
+        service.get_linked_bugzilla_bug_id("JBI-1")

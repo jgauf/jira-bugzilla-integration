@@ -34,6 +34,14 @@ JIRA_REQUIRED_PERMISSIONS = {
 }
 
 
+class JiraAuthenticationError(Exception):
+    """Jira rejected our credentials.
+
+    Raised rather than swallowed so an inbound event is retried instead of
+    being acknowledged as "nothing to do".
+    """
+
+
 class JiraService:
     """Used by action workflows to perform action-specific Jira tasks"""
 
@@ -253,6 +261,19 @@ class JiraService:
         except requests_exceptions.HTTPError as exc:
             if getattr(exc.response, "status_code", None) != 404:
                 raise
+            # Jira answers 404 both for "no such issue" and for "you cannot
+            # see it", including when the credentials have stopped working.
+            # Those need opposite handling: the first means the event is
+            # genuinely uncorrelated and should be acknowledged, the second
+            # is an outage whose events must be redelivered once access is
+            # restored. Returning None for both silently discards every
+            # inbound event for the duration of a credentials failure.
+            # Same defence as `BugzillaClient.get_bug`: confirm we are
+            # authenticated before concluding the issue does not exist.
+            if not self.is_authenticated():
+                raise JiraAuthenticationError(
+                    f"cannot read issue {issue_key}: Jira credentials are not working"
+                ) from exc
             logger.error("Could not read remote links of issue %s", issue_key)
             return None
 
@@ -426,6 +447,13 @@ class JiraService:
             jira_status,
             **kwargs,
         )
+
+    def is_authenticated(self) -> bool:
+        """Whether the configured credentials currently work."""
+        try:
+            return bool(self.client.myself())
+        except Exception:
+            return False
 
     def get_issue_type(self, context: ActionContext, issue_key: str) -> Optional[str]:
         """Return an issue's type name, or `None` if it cannot be read."""
