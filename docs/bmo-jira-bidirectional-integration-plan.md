@@ -181,6 +181,16 @@ Loop-safety therefore has to be symmetric, and v2 only had half of it.
   no-op, so even an unsuppressed echo terminates after one round trip instead of
   oscillating.
 
+**Verified live (2026-09-24).** A Jira Automation rule and a BMO webhook were
+pointed at a tunnelled JBI. With `bugzilla_bot_login` unset, one Jira
+transition produced one BMO write, which came back through the webhook and
+drove a forward pass that posted **two comments** onto the issue — the field
+writes were idempotent, but comment posting has no read-before-write
+equivalent, so the echo showed up as comment noise rather than as changed
+data. With the login set, three transitions produced three BMO writes, all
+three resulting webhooks arrived and all three were dropped, and no forward
+pass ran at all.
+
 Why both layers are needed: without the actor check, every reverse write costs a
 wasted BMO→Jira round trip. Without read-before-write, a value that does *not*
 survive the round trip identically — which is exactly the risk the non-invertible
