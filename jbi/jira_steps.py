@@ -182,6 +182,12 @@ def _changed(context: ReverseContext, field: str) -> bool:
     """
     if not is_writeback_allowed(field):
         return False
+    if not context.event.has_changelog:
+        # Opted in via `reverse_sync_without_changelog` (the handler rejects
+        # the event otherwise): treat the payload as a full-state push. Note
+        # this also disables conflict detection, since there is no previous
+        # value to compare against.
+        return context.action.parameters.reverse_sync_without_changelog
     return field in context.event.changed_fields()
 
 

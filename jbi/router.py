@@ -110,8 +110,8 @@ async def bugzilla_webhook(
     dependencies=[Depends(api_key_auth)],
 )
 async def jira_webhook(
+    request: Request,
     actions: ActionsDep,
-    jira_event: jira_inbound_models.JiraWebhookRequest = Body(..., embed=False),
 ):
     """API endpoint that the central Jira Automation rule posts to.
 
@@ -120,6 +120,18 @@ async def jira_webhook(
     act on -- the overwhelming majority -- are reported as `ignored` rather
     than as errors, since Jira Automation forwards far more than JBI handles.
     """
+    # Read the body directly rather than through a typed `Body(...)`
+    # parameter: Jira Automation's "Send web request" does not reliably send
+    # `Content-Type: application/json`, and FastAPI then passes the raw bytes
+    # to the model, which fails with a confusing 422 about the body not being
+    # an object. Producers we do not control should not be able to cause that.
+    try:
+        payload = await request.json()
+        jira_event = jira_inbound_models.JiraWebhookRequest.model_validate(payload)
+    except Exception as exc:
+        logger.error("Could not parse inbound Jira payload: %s", exc)
+        return {"status": "invalid", "reason": str(exc)}
+
     result = await ingest_event(
         InboundEvent(
             source=EventSource.JIRA,

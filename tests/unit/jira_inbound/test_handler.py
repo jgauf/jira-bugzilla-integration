@@ -227,3 +227,45 @@ def test_group_restricted_bug_gets_no_reverse_writes(
 
     assert "core-security" in str(exc_info.value)
     assert not mocked_bugzilla.update_bug.called
+
+
+def test_event_without_a_changelog_is_refused_loudly(
+    correlated, jira_webhook_request_factory, inbound_actions
+):
+    """Without a changelog JBI cannot tell what moved. Refusing says so;
+    accepting would report "handled" while every writer silently NOOPed,
+    which looks like success and syncs nothing."""
+    event = jira_webhook_request_factory(changelog=None)
+
+    with pytest.raises(IgnoreInvalidRequestError) as exc_info:
+        execute_jira_event(event, inbound_actions)
+
+    assert "no changelog" in str(exc_info.value)
+
+
+def test_full_state_sync_can_be_opted_into(
+    correlated, jira_webhook_request_factory, action_factory, mocked_bugzilla
+):
+    """`reverse_sync_without_changelog` accepts a full-state push for
+    deployments whose producer cannot send a changelog."""
+    actions = Actions(
+        root=[
+            action_factory(
+                whiteboard_tag="devtest",
+                parameters__jira_project_key="JBI",
+                parameters__jira_inbound_enabled=True,
+                parameters__reverse_sync_without_changelog=True,
+            )
+        ]
+    )
+    event = jira_webhook_request_factory(
+        changelog=None, issue__fields__status__statusCategory__key="indeterminate"
+    )
+
+    details = execute_jira_event(event, actions)
+
+    # The point is that the writer *ran* rather than being short-circuited by
+    # the missing changelog. It reports INCOMPLETE here for an unrelated and
+    # correct reason: the fixture's bug is unassigned, and BMO rejects
+    # `status: ASSIGNED` on a bug with no assignee.
+    assert details["steps"]["writeback_status"] == "INCOMPLETE"

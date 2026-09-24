@@ -17,9 +17,16 @@ from jbi.bugzilla.models import SmartAwareDatetime
 
 
 class LenientModel(BaseModel):
-    """Base for inbound payloads: immutable, and tolerant of extra keys."""
+    """Base for inbound payloads: immutable, tolerant of extra keys and of
+    numeric ids.
 
-    model_config = ConfigDict(extra="ignore", frozen=True)
+    Jira sends ids as JSON numbers (`"id": 747979`, `"id": 3`) while the
+    REST documentation shows strings, and pydantic v2 does not coerce int to
+    str by default -- so without `coerce_numbers_to_str` a real Automation
+    payload fails validation on a field we do not even use.
+    """
+
+    model_config = ConfigDict(extra="ignore", frozen=True, coerce_numbers_to_str=True)
 
 
 class JiraUser(LenientModel):
@@ -184,3 +191,16 @@ class JiraWebhookRequest(LenientModel):
         if not self.changelog:
             return []
         return [item.field for item in self.changelog.items if item.field]
+
+    @property
+    def has_changelog(self) -> bool:
+        """Whether this payload says *which* fields changed.
+
+        Jira Automation's built-in "Issue data (Jira format)" body does not
+        include one: it nests an empty `issue.changelog` (`histories: null`)
+        and sends no top-level `changelog`. Verified against a real delivery.
+        Without it JBI knows the issue's current state but not what moved,
+        and "sync only what changed" is what stops a Jira event overwriting a
+        BMO field a human just edited.
+        """
+        return bool(self.changelog and self.changelog.items)

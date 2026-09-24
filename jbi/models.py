@@ -162,6 +162,14 @@ class ActionParams(BaseModel, frozen=True):
     reverse_status_overrides: dict[str, str] = {}
     default_reverse_resolution: Optional[str] = None
 
+    # What to do when an inbound Jira payload carries no changelog, so JBI
+    # can see the issue's current state but not which field moved. Default
+    # off: "sync only what changed" is what stops a Jira event overwriting a
+    # BMO field a human just edited, and without a changelog there is also no
+    # previous value for the conflict rule to compare against. Turning this on
+    # accepts a full-state push from Jira on every event.
+    reverse_sync_without_changelog: bool = False
+
     # An escape hatch for humans: adding this label to a Jira issue halts
     # syncing for that bug/issue pair in BOTH directions, and removing it
     # resumes. Unset means the feature is off for this action.

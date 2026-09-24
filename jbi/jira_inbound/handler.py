@@ -157,6 +157,15 @@ def execute_jira_event(event: JiraWebhookRequest, actions: Actions) -> dict:
             statsd.incr("jbi.sync_stopped.count")
             raise _ignore(f"sync stopped by the {stop_label!r} label on {issue_key}")
 
+    if not event.has_changelog and not action.parameters.reverse_sync_without_changelog:
+        # Loud rather than silent: without this the event is "handled" and
+        # every writer NOOPs, which looks like success and syncs nothing.
+        raise _ignore(
+            f"payload for {issue_key} carries no changelog, so JBI cannot "
+            "tell which field changed; configure the Automation rule to send "
+            "one, or set `reverse_sync_without_changelog`"
+        )
+
     context = ReverseContext(
         action=action,
         bug=bug,
