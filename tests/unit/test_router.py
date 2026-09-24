@@ -644,3 +644,27 @@ def test_wrong_token_is_rejected(anon_client, path):
     )
 
     assert response.status_code == 401
+
+
+def test_a_bugzilla_payload_on_the_jira_endpoint_says_so(
+    authenticated_client, capturelogs
+):
+    """The two paths differ by one word and share their auth, so a misrouted
+    BMO webhook otherwise reads as an empty Jira event and is ignored -- which
+    is what happened when a real webhook was first wired up."""
+    import logging
+
+    with capturelogs.for_logger("jbi.router").at_level(logging.ERROR):
+        response = authenticated_client.post(
+            "/jira_webhook",
+            json={
+                "webhook_id": 1,
+                "webhook_name": "bmo",
+                "event": {"action": "modify", "time": "2026-09-24T00:00:00Z"},
+                "bug": {"id": 1855574},
+            },
+        )
+
+    assert response.status_code == 200
+    assert "bugzilla_webhook" in response.json()["reason"]
+    assert any("wrong endpoint" in r.message for r in capturelogs.records)

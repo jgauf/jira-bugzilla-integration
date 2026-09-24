@@ -127,6 +127,28 @@ async def jira_webhook(
     # an object. Producers we do not control should not be able to cause that.
     try:
         payload = await request.json()
+    except Exception as exc:
+        logger.error("Could not parse inbound Jira payload: %s", exc)
+        return {"status": "invalid", "reason": str(exc)}
+
+    # The two inbound paths differ by one word and take the same auth, so a
+    # misrouted Bugzilla webhook otherwise looks like a Jira event with
+    # nothing in it ("no issue key in payload") and is silently ignored --
+    # observed while wiring up a real BMO webhook.
+    if isinstance(payload, dict) and "bug" in payload and "event" in payload:
+        logger.error(
+            "Received a Bugzilla payload on /jira_webhook (bug %s). The "
+            "producer is pointed at the wrong endpoint; it should post to "
+            "/bugzilla_webhook.",
+            (payload.get("bug") or {}).get("id"),
+        )
+        return {
+            "status": "invalid",
+            "reason": "this looks like a Bugzilla payload; post it to "
+            "/bugzilla_webhook",
+        }
+
+    try:
         jira_event = jira_inbound_models.JiraWebhookRequest.model_validate(payload)
     except Exception as exc:
         logger.error("Could not parse inbound Jira payload: %s", exc)
