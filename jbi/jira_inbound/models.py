@@ -11,7 +11,7 @@ missing. The reverse steps decide what they can act on.
 
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from jbi.bugzilla.models import SmartAwareDatetime
 
@@ -27,6 +27,26 @@ class LenientModel(BaseModel):
     """
 
     model_config = ConfigDict(extra="ignore", frozen=True, coerce_numbers_to_str=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _empty_strings_are_absent(cls, data):
+        """Treat `""` as a missing value.
+
+        Jira Automation renders an unset smart value as an empty string, so a
+        custom request body yields `{"name": ""}` where the built-in format
+        sends `null`. Without this, an unrestricted issue arrives carrying a
+        present-but-empty `security` object, which the Invariant D guard reads
+        as "embargoed" and uses to block every free-text write-back -- and an
+        unassigned issue arrives with an empty `accountId` that looks like a
+        real user. Normalising here keeps that difference out of every caller.
+        """
+        if not isinstance(data, dict):
+            return data
+        return {
+            key: (None if isinstance(value, str) and not value.strip() else value)
+            for key, value in data.items()
+        }
 
 
 class JiraUser(LenientModel):

@@ -87,3 +87,94 @@ def test_automations_builtin_body_carries_no_changelog(parsed, real_payload):
     assert real_payload["issue"]["changelog"]["histories"] is None
     assert parsed.has_changelog is False
     assert parsed.changed_fields() == []
+
+
+# --- The custom body we ask operators to configure --------------------------
+
+
+def _custom_body_rendering(**overrides):
+    """What `.local-harness/automation-custom-body.json` renders to.
+
+    Automation fills unset smart values with empty strings, so this is the
+    sparse case: no security level, no assignee, no resolution.
+    """
+    payload = {
+        "webhookEvent": "jira:issue_updated",
+        "user": {"accountId": "712020:b449", "displayName": "John Gauf"},
+        "issue": {
+            "id": "747979",
+            "key": "AIPLAT-1306",
+            "fields": {
+                "summary": "a summary",
+                "project": {"key": "AIPLAT"},
+                "status": {
+                    "name": "In Progress",
+                    "statusCategory": {"key": "indeterminate"},
+                },
+                "resolution": {"name": ""},
+                "priority": {"name": "None"},
+                "assignee": {"accountId": "", "displayName": "", "emailAddress": ""},
+                "security": {"name": ""},
+                "labels": ["bugzilla"],
+            },
+        },
+        "changelog": {
+            "items": [
+                {"field": "__rule__"},
+                {"field": "status", "fromString": "To Do", "toString": "In Progress"},
+            ]
+        },
+    }
+    payload["issue"]["fields"].update(overrides)
+    return payload
+
+
+def test_custom_body_supplies_the_changelog_the_builtin_format_lacks():
+    """The whole reason for a custom body: without it JBI cannot tell which
+    field moved and refuses the event."""
+    event = JiraWebhookRequest.model_validate(_custom_body_rendering())
+
+    assert event.has_changelog is True
+    assert "status" in event.changed_fields()
+
+
+def test_the_sentinel_item_keeps_the_json_valid_and_writes_nothing():
+    """A leading `__rule__` item lets every real item be comma-prefixed, so
+    the array stays valid JSON however many sections render. It must not be
+    mistaken for a field to write back."""
+    from jbi.writeback import is_writeback_allowed
+
+    event = JiraWebhookRequest.model_validate(_custom_body_rendering())
+
+    assert "__rule__" in event.changed_fields()
+    assert is_writeback_allowed("__rule__") is False
+
+
+def test_empty_smart_values_do_not_look_like_a_security_level():
+    """The trap this template would otherwise spring: Automation renders an
+    unset `{{issue.security.name}}` as "", and a present-but-empty security
+    object would make Invariant D block all free-text write-back on every
+    issue."""
+    from jbi.visibility import jira_issue_restriction_reason
+
+    event = JiraWebhookRequest.model_validate(_custom_body_rendering())
+
+    assert event.issue.fields.security.name is None
+    assert jira_issue_restriction_reason(event) is None
+
+
+def test_empty_assignee_is_not_mistaken_for_a_user():
+    event = JiraWebhookRequest.model_validate(_custom_body_rendering())
+
+    assert event.issue.fields.assignee.accountId is None
+
+
+def test_a_real_security_level_in_a_custom_body_still_blocks():
+    """The normalisation must not defeat the guard when a level *is* set."""
+    from jbi.visibility import jira_issue_restriction_reason
+
+    event = JiraWebhookRequest.model_validate(
+        _custom_body_rendering(security={"name": "Security Team Only"})
+    )
+
+    assert "Security Team Only" in jira_issue_restriction_reason(event)

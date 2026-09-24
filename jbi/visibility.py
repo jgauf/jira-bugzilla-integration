@@ -51,7 +51,13 @@ def jira_comment_restriction_reason(event: JiraWebhookRequest) -> Optional[str]:
     comment = event.comment
     if comment is None:
         return None
-    if comment.visibility is not None:
+    if comment.visibility is not None and any(
+        (
+            comment.visibility.value,
+            comment.visibility.type,
+            comment.visibility.identifier,
+        )
+    ):
         target = comment.visibility.value or comment.visibility.type or "a role/group"
         return f"Jira comment is restricted to {target}"
     if comment.jsdPublic is False:
@@ -69,7 +75,7 @@ def jira_issue_restriction_reason(event: JiraWebhookRequest) -> Optional[str]:
     issue = event.issue
     fields = issue.fields if issue else None
     security = fields.security if fields else None
-    if security is not None:
+    if security is not None and (security.name or security.id):
         name = security.name or security.id or "restricted"
         return f"Jira issue has security level {name!r}"
     return None
