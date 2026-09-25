@@ -35,8 +35,31 @@ def was_written_by_reverse_sync(body: Optional[str]) -> bool:
     return body.lstrip().startswith(REVERSE_COMMENT_PREFIX)
 
 
+# Jira re-renders wiki markup on the way out, so the marker JBI wrote is not
+# the marker it reads back: `*someone@example.com* commented:` comes back as
+# `_[mailto:someone@example.com]_ commented:`. Matching only the written form
+# lets the rendered one through, which is how the loop survived the first
+# attempt at this breaker.
+RENDERED_FORWARD_RE = re.compile(r"^_?\[?mailto:[^\]]*\]?_?\s+commented:")
+
+
 def was_written_by_forward_sync(body: Optional[str]) -> bool:
-    """True when this Jira comment was copied from Bugzilla by JBI."""
+    """True when this Jira comment originated from JBI rather than a human.
+
+    Three signals, in increasing order of robustness:
+
+    1. the marker as JBI writes it;
+    2. the same marker as Jira renders it back;
+    3. **our own reverse-sync prefix appearing anywhere in the text.** That
+       phrase only exists because JBI put it on a bug, so finding it in a
+       Jira comment means the text has already round-tripped. This is the
+       one that does not depend on how Jira formats anything.
+    """
     if not body:
         return False
-    return bool(FORWARD_COMMENT_RE.match(body.lstrip()))
+    text = body.lstrip()
+    if FORWARD_COMMENT_RE.match(text):
+        return True
+    if RENDERED_FORWARD_RE.match(text):
+        return True
+    return REVERSE_COMMENT_PREFIX in text

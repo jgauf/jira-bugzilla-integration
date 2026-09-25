@@ -73,3 +73,42 @@ def test_forward_sync_skips_a_comment_it_imported_from_jira(
     assert result == steps.StepStatus.NOOP
     assert not mocked_jira.issue_add_comment.called
     assert any("reverse sync" in r.message for r in capturelogs.records)
+
+
+# --- Jira re-renders the marker it was given --------------------------------
+
+# JBI writes `*someone@example.com* commented:` into Jira; Automation's
+# `{{comment.body}}` reads it back as `_[mailto:someone@example.com]_
+# commented:`. Captured from a live loop -- the first version of this breaker
+# matched only the written form and the loop continued straight through it.
+RENDERED_ONCE = (
+    "_[mailto:jgauf@mozilla.com]_ commented: from Jira, by John Gauf: testing"
+)
+RENDERED_TWICE = (
+    "_\\[mailto:[mailto:jgauf@mozilla.com]\\]_ commented: from Jira, by "
+    "John Gauf: testing comment number 2"
+)
+
+
+@pytest.mark.parametrize("body", [RENDERED_ONCE, RENDERED_TWICE])
+def test_jira_rendered_markers_are_recognised(body):
+    assert was_written_by_forward_sync(body) is True
+
+
+def test_the_reverse_prefix_anywhere_marks_round_tripped_text():
+    """The rendering-independent signal: that phrase exists only because JBI
+    wrote it onto a bug, so seeing it in a Jira comment means the text has
+    already been round-tripped."""
+    assert was_written_by_forward_sync("something from Jira, by Someone: x") is True
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "I commented: on this yesterday",
+        "see the mailto: link in the docs",
+        "a normal comment mentioning jira",
+    ],
+)
+def test_human_text_is_not_caught_by_the_broader_matching(body):
+    assert was_written_by_forward_sync(body) is False
