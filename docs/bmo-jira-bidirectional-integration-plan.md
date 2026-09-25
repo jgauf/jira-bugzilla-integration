@@ -999,6 +999,26 @@ one push subscription.
 
 **Jira — new for bidirectional (this project):**
 
+> **Who publishes Jira events? Confirmed as an onboarding question by live
+> testing.** The sandbox used a per-project Automation rule, which is the
+> thing review already rejected: it does not scale, and it means asking every
+> team to build an automation. Three ways to avoid that, in order of
+> preference:
+>
+> 1. **A site-level Jira webhook with a JQL scope** — one admin config for
+>    every project, and it sends Jira's standard webhook payload, which
+>    **includes the changelog natively**. Automation's built-in body does
+>    not (see D14's findings), so this also removes the custom-body
+>    requirement below. Needs a Jira site admin; not self-service.
+> 2. **One central multi-project Automation rule** (the v3 decision) — needs
+>    a plan that supports multi-project rule scope (§13-7).
+> 3. **A Jira → Pub/Sub bridge**, if the org already runs one.
+>
+> Whichever is chosen, onboarding a team must mean editing a JQL clause and
+> adding a `config.yaml` entry — never asking that team to configure Jira.
+> **The custom request body documented below is only needed for options 2
+> and 3**, because Automation is the producer that omits the changelog.
+
 - **One centrally-owned, multi-project Automation rule** — *not* one rule per
   project. *When an issue's status, assignee, priority, or summary changes, or a
   comment is added → **Send web request*** to
