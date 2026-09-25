@@ -7,6 +7,8 @@ comment grows without bound. This was observed live before the breakers
 existed.
 """
 
+import json
+
 import pytest
 
 from jbi import Operation, steps
@@ -111,4 +113,37 @@ def test_the_reverse_prefix_anywhere_marks_round_tripped_text():
     ],
 )
 def test_human_text_is_not_caught_by_the_broader_matching(body):
+    assert was_written_by_forward_sync(body) is False
+
+
+# --- the forward path's change comments -------------------------------------
+
+# `add_jira_comments_for_changes` posts a JSON blob, not prose, so it carries
+# neither prose marker. Copying it back put a duplicate note on the bug for a
+# change the bug already records in its own history -- seen live as a status
+# change "posting twice".
+CHANGE_COMMENT = json.dumps(
+    {"modified by": "jgauf@mozilla.com", "resolution": "", "status": "ASSIGNED"},
+    indent=4,
+)
+ASSIGNEE_COMMENT = json.dumps({"assignee": "jgauf@mozilla.com"}, indent=4)
+
+
+@pytest.mark.parametrize("body", [CHANGE_COMMENT, ASSIGNEE_COMMENT])
+def test_change_comments_are_recognised_as_jbis_own(body):
+    assert was_written_by_forward_sync(body) is True
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"some": "config", "a user": "pasted this"}',
+        '{"status": "ASSIGNED", "extra": "field not ours"}',
+        "not json at all",
+        '{"broken": ',
+    ],
+)
+def test_other_json_is_not_mistaken_for_a_change_comment(body):
+    """Matching is by exact key set, so a user pasting JSON that happens to
+    mention `status` still syncs."""
     assert was_written_by_forward_sync(body) is False

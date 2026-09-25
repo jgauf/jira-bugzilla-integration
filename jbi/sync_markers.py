@@ -17,6 +17,7 @@ So comments carry a marker and each direction refuses to re-import the
 other's. This is defence in depth, independent of identity config.
 """
 
+import json
 import re
 from typing import Optional
 
@@ -43,6 +44,29 @@ def was_written_by_reverse_sync(body: Optional[str]) -> bool:
 RENDERED_FORWARD_RE = re.compile(r"^_?\[?mailto:[^\]]*\]?_?\s+commented:")
 
 
+# `JiraService.add_jira_comments_for_changes` posts a JSON blob rather than
+# prose, so it carries neither marker above:
+#     {"modified by": "someone@example.com", "resolution": "", "status": "ASSIGNED"}
+# Copying that back onto the bug duplicates a change the bug already records
+# in its own history -- observed as a status change "posting twice".
+FORWARD_CHANGE_KEYS = {"modified by", "resolution", "status", "assignee"}
+
+
+def _is_forward_change_comment(text: str) -> bool:
+    """True for the JSON blob the forward path posts for field changes."""
+    if not text.lstrip().startswith("{"):
+        return False
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return False
+    return (
+        isinstance(parsed, dict)
+        and bool(parsed)
+        and set(parsed).issubset(FORWARD_CHANGE_KEYS)
+    )
+
+
 def was_written_by_forward_sync(body: Optional[str]) -> bool:
     """True when this Jira comment originated from JBI rather than a human.
 
@@ -50,7 +74,8 @@ def was_written_by_forward_sync(body: Optional[str]) -> bool:
 
     1. the marker as JBI writes it;
     2. the same marker as Jira renders it back;
-    3. **our own reverse-sync prefix appearing anywhere in the text.** That
+    3. the JSON blob the forward path posts for field changes;
+    4. **our own reverse-sync prefix appearing anywhere in the text.** That
        phrase only exists because JBI put it on a bug, so finding it in a
        Jira comment means the text has already round-tripped. This is the
        one that does not depend on how Jira formats anything.
@@ -61,5 +86,7 @@ def was_written_by_forward_sync(body: Optional[str]) -> bool:
     if FORWARD_COMMENT_RE.match(text):
         return True
     if RENDERED_FORWARD_RE.match(text):
+        return True
+    if _is_forward_change_comment(text):
         return True
     return REVERSE_COMMENT_PREFIX in text
