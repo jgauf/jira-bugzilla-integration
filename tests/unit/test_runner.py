@@ -1232,3 +1232,29 @@ def test_bug_restricted_after_the_webhook_fired_is_not_synced(
 
     assert "core-security" in str(exc_info.value)
     assert not mocked_jira.create_issue.called
+
+
+def test_a_real_restricted_bug_payload_is_rejected(
+    webhook_request_factory, actions, mocked_jira, mocked_bugzilla
+):
+    """The shape BMO actually sends for a group-restricted bug, captured from
+    bugzilla-dev: `is_private: true`, **no** `groups` key, and the summary
+    redacted to null. The REST API reports the opposite for the same bug
+    (`is_private: None` with `groups` populated), which is why the guard
+    checks both signals rather than picking one."""
+    webhook = webhook_request_factory(
+        bug__is_private=True,
+        bug__groups=None,
+        bug__summary=None,
+        bug__whiteboard="[devtest]",
+    )
+    mocked_bugzilla.get_bug.return_value = webhook.bug
+
+    with pytest.raises(IgnoreInvalidRequestError) as exc_info:
+        execute_action(request=webhook, actions=actions)
+
+    assert "restricted" in str(exc_info.value)
+    # Crucially, rejected *before* the refresh: JBI's own account may belong
+    # to the group, so a re-fetch would return the full, unredacted bug.
+    assert not mocked_bugzilla.get_bug.called
+    assert not mocked_jira.create_issue.called
