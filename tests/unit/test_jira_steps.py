@@ -1233,3 +1233,35 @@ def test_server_error_is_not_swallowed(
     with mock.patch.object(jira_steps, "REVERSE_STEPS", [_raising_step(503)]):
         with pytest.raises(requests.HTTPError):
             jira_steps.ReverseExecutor(bugzilla_service=mocked_service)(context)
+
+
+def test_reverse_sync_skips_a_comment_jbi_put_on_the_issue(
+    action_factory,
+    bug_factory,
+    jira_webhook_request_factory,
+    mocked_service,
+    mocked_bugzilla,
+    capturelogs,
+):
+    """Jira side of the loop breaker. JBI's forward sync wrote this comment
+    onto the issue from a bug comment; copying it back nests the attribution
+    and grows the text every hop."""
+    import logging
+
+    context = make_context(
+        action_factory,
+        bug_factory,
+        jira_webhook_request_factory,
+        action_kwargs={"parameters__reverse_comment_sync_enabled": True},
+        with_comment=True,
+        comment__body="*jgauf@mozilla.com* commented: \nfrom Jira, by John Gauf: hi",
+    )
+
+    with capturelogs.for_logger("jbi.jira_steps").at_level(logging.INFO):
+        status, _ = jira_steps.writeback_comment(
+            context, bugzilla_service=mocked_service
+        )
+
+    assert status == ReverseStepStatus.NOOP
+    assert not mocked_bugzilla.update_bug.called
+    assert any("forward sync" in r.message for r in capturelogs.records)

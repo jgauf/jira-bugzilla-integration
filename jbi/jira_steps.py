@@ -23,6 +23,7 @@ from jbi.bugzilla.models import Bug
 from jbi.identity import UNASSIGNED_EMAIL, get_identity_map
 from jbi.jira_inbound.models import JiraWebhookRequest
 from jbi.models import Action, Context
+from jbi.sync_markers import was_written_by_forward_sync
 from jbi.visibility import can_copy_jira_text_to_bug
 from jbi.writeback import (
     bmo_wins_conflict,
@@ -463,6 +464,19 @@ def writeback_comment(
         return (ReverseStepStatus.NOOP, context)
 
     if not context.action.parameters.reverse_comment_sync_enabled:
+        return (ReverseStepStatus.NOOP, context)
+
+    if was_written_by_forward_sync(context.event.comment.body):
+        # JBI put this comment on the issue in the first place, copied from
+        # the bug. Re-importing it would nest the attribution and grow the
+        # text on every hop -- see `jbi.sync_markers`.
+        logger.info(
+            "Comment on %s was written by JBI's forward sync; not copying it "
+            "back to Bug %s",
+            context.issue_key,
+            context.bug.id,
+            extra=context.model_dump(),
+        )
         return (ReverseStepStatus.NOOP, context)
 
     if can_copy_jira_text_to_bug(context.bug, context.event):

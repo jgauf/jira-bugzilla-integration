@@ -21,6 +21,7 @@ from jbi import Operation
 from jbi.bugzilla.models import JIRA_HOSTNAMES, WebhookAttachment
 from jbi.environment import get_settings
 from jbi.identity import get_identity_map
+from jbi.sync_markers import was_written_by_reverse_sync
 
 
 class StepStatus(Enum):
@@ -63,6 +64,18 @@ def create_comment(context: ActionContext, *, jira_service: JiraService) -> Step
             logger.info(
                 "Comment message is empty",
                 extra=context.model_dump(),
+            )
+            return (StepStatus.NOOP, context)
+
+        if was_written_by_reverse_sync(bug.comment.body):
+            # JBI copied this comment from Jira; sending it back would nest
+            # the attribution and grow the text on every hop.
+            logger.info(
+                "Comment %s on Bug %s came from JBI's reverse sync; not "
+                "copying it to Jira",
+                bug.comment.id,
+                bug.id,
+                extra=context.update(operation=Operation.IGNORE).model_dump(),
             )
             return (StepStatus.NOOP, context)
 
