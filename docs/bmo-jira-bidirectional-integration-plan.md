@@ -191,6 +191,22 @@ data. With the login set, three transitions produced three BMO writes, all
 three resulting webhooks arrived and all three were dropped, and no forward
 pass ran at all.
 
+**Comments need a third layer (added after live testing).** Field echo is
+bounded — read-before-write makes the second write a no-op. Comment echo is
+not: each hop rewraps the text in another attribution layer, so the body
+differs every time, no duplicate check matches, and the comment grows without
+bound. Observed live when an identity gate was unset. Comments therefore also
+carry **content markers** (`jbi/sync_markers.py`): each direction recognises
+the other's output and refuses to re-import it, independently of
+configuration. Three variants had to be recognised before this held, each
+found by running it:
+
+- the marker as JBI writes it (`*user@example.com* commented:`);
+- the same marker after **Jira re-renders it** (`_[mailto:user@example.com]_
+  commented:`) — a marker is not read back in the form it was written;
+- the forward path's **change comments**, which are a JSON blob
+  (`{"modified by": …, "status": …}`) carrying no prose marker at all.
+
 Why both layers are needed: without the actor check, every reverse write costs a
 wasted BMO→Jira round trip. Without read-before-write, a value that does *not*
 survive the round trip identically — which is exactly the risk the non-invertible
