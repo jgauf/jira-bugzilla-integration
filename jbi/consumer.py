@@ -94,7 +94,10 @@ def decode_message(message: Any) -> DecodedMessage:
         raise UndecodableMessage(f"data is not valid UTF-8: {exc}") from exc
 
     try:
-        payload = json.loads(raw)
+        # See the router: producers interpolate comment bodies into JSON
+        # without escaping newlines, so literal control characters are
+        # normal traffic rather than corruption.
+        payload = json.loads(raw, strict=False)
     except json.JSONDecodeError as exc:
         raise UndecodableMessage(f"data is not valid JSON: {exc}") from exc
 

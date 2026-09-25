@@ -172,8 +172,14 @@ class JiraComment(LenientModel):
     created: Optional[SmartAwareDatetime] = None
     # Present when the comment is limited to a project role or group.
     visibility: Optional[JiraVisibility] = None
-    # Jira Service Management: False means an internal-only comment.
+    # Two spellings of the same idea, and they are **inverses**:
+    # `jsdPublic: false` means internal-only, while `internal: true` means
+    # internal-only. Jira's own webhooks send the first; Automation's
+    # `{{comment.internal}}` smart value produces the second. Modelling only
+    # one of them invites exactly the confusion that blocked every public
+    # comment on the first attempt here.
     jsdPublic: Optional[bool] = None
+    internal: Optional[bool] = None
 
 
 class JiraWebhookRequest(LenientModel):

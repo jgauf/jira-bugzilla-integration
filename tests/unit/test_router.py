@@ -668,3 +668,23 @@ def test_a_bugzilla_payload_on_the_jira_endpoint_says_so(
     assert response.status_code == 200
     assert "bugzilla_webhook" in response.json()["reason"]
     assert any("wrong endpoint" in r.message for r in capturelogs.records)
+
+
+def test_a_comment_body_with_newlines_is_accepted(authenticated_client, mocked_jira):
+    """Automation interpolates `{{comment.body}}` into JSON without escaping,
+    so a multi-line comment arrives with literal control characters inside a
+    string. Strict JSON rejects that, which broke comment sync for virtually
+    every real comment."""
+    mocked_jira.get_issue_remote_links.return_value = []
+    raw = (
+        '{"webhookEvent":"comment_created",'
+        '"issue":{"key":"JBI-234","fields":{"project":{"key":"JBI"}}},'
+        '"comment":{"id":"1","body":"line one\nline two\twith a tab"}}'
+    )
+
+    response = authenticated_client.post(
+        "/jira_webhook", content=raw, headers={"Content-Type": "application/json"}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] != "invalid"

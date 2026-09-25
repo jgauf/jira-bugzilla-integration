@@ -62,6 +62,8 @@ def jira_comment_restriction_reason(event: JiraWebhookRequest) -> Optional[str]:
         return f"Jira comment is restricted to {target}"
     if comment.jsdPublic is False:
         return "Jira comment is internal-only (jsdPublic=false)"
+    if comment.internal is True:
+        return "Jira comment is internal-only (internal=true)"
     return None
 
 

@@ -110,3 +110,36 @@ def test_bug_restriction_reason_names_the_groups(bug_factory):
     reason = bug_restriction_reason(bug_factory(groups=["core-security", "embargo"]))
 
     assert "core-security" in reason and "embargo" in reason
+
+
+# --- internal vs jsdPublic are inverses ------------------------------------
+
+
+def test_internal_true_is_restricted():
+    """Automation's `{{comment.internal}}` renders `true` for an
+    internal-only comment."""
+    event = _event(comment=JiraComment(body="x", internal=True))
+
+    assert "internal=true" in jira_comment_restriction_reason(event)
+
+
+def test_internal_false_is_not_restricted():
+    """The bug this pins: mapping `internal` onto `jsdPublic` inverted the
+    meaning, so a public comment (`internal: false`) read as internal-only
+    and every comment was blocked."""
+    event = _event(comment=JiraComment(body="x", internal=False))
+
+    assert jira_comment_restriction_reason(event) is None
+
+
+def test_jsd_public_false_is_still_restricted():
+    """Jira's own webhooks use the opposite spelling."""
+    event = _event(comment=JiraComment(body="x", jsdPublic=False))
+
+    assert "jsdPublic=false" in jira_comment_restriction_reason(event)
+
+
+def test_neither_flag_present_is_not_restricted():
+    event = _event(comment=JiraComment(body="x"))
+
+    assert jira_comment_restriction_reason(event) is None

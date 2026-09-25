@@ -2,6 +2,7 @@
 Core FastAPI app (setup, middleware)
 """
 
+import json
 import logging
 import secrets
 from pathlib import Path
@@ -126,7 +127,12 @@ async def jira_webhook(
     # to the model, which fails with a confusing 422 about the body not being
     # an object. Producers we do not control should not be able to cause that.
     try:
-        payload = await request.json()
+        # `strict=False` accepts literal control characters inside strings.
+        # A Jira comment body almost always contains newlines, and a producer
+        # that interpolates it into JSON without escaping (Automation's
+        # `{{comment.body}}`) emits exactly that. Rejecting the payload would
+        # make comment sync fail for nearly every real comment.
+        payload = json.loads(await request.body(), strict=False)
     except Exception as exc:
         logger.error("Could not parse inbound Jira payload: %s", exc)
         return {"status": "invalid", "reason": str(exc)}
