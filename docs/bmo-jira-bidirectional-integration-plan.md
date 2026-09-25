@@ -1069,13 +1069,19 @@ one push subscription.
    future project wanting a genuinely many-to-one resolution map; it would fail
    validation and need an explicit reverse override, which is the intended
    loud-failure behavior rather than a silent wrong write.
-10. **Confidentiality field shapes** — the guard depends on the Automation
-    payload carrying `comment.visibility`, `comment.jsdPublic` and
-    `fields.security`. Absent fields are treated as unrestricted *only*
-    because enabling `reverse_comment_sync_enabled` asserts the rule sends
-    them; verify the real shapes in the sandbox before enabling it anywhere.
-    Confirm too what a group-restricted BMO bug's webhook payload contains
-    for `is_private` and `groups`.
+10. **Confidentiality field shapes** — *resolved, both halves.*
+    **Jira:** the built-in Automation body sends `security: null`; a custom
+    body renders an unset level as `{"name": ""}`, which the inbound models
+    now normalise to absent — without that, every issue would read as
+    embargoed and all free-text write-back would be blocked.
+    **BMO:** a group-restricted bug's webhook payload carries
+    `is_private: true`, **omits `groups` entirely**, and redacts the summary
+    to null — while the REST API, queried as a group member, reports the
+    same bug as `is_private: None` with `groups` populated. Neither signal
+    alone covers both sources, which is why the guard checks both. Note BMO
+    redacting the payload does not make the guard optional: JBI re-fetches
+    the bug as its own account, which may belong to the group, so the
+    rejection has to happen before the refresh.
 11. **Duplicate suppression is in-process only.** The cache is bounded and
     per-process, so two consumer replicas do not share it and a restart
     forgets it. Field writes are idempotent regardless; the exposure is a
